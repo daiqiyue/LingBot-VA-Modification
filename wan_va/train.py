@@ -85,6 +85,7 @@ class Trainer:
             transformer_path,
             torch_dtype=torch.float32,
             torch_device='cpu',
+            attn_mode="flex"
         )
 
         logger.info("Setting up activation checkpointing ...")
