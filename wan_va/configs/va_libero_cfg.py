@@ -7,7 +7,7 @@ va_libero_cfg = EasyDict(__name__='Config: VA libero')
 va_libero_cfg.update(va_shared_cfg)
 va_shared_cfg.infer_mode = 'server'
 
-va_libero_cfg.wan22_pretrained_model_name_or_path = "/path/to/pretrained/model"
+va_libero_cfg.wan22_pretrained_model_name_or_path = "/storage/home/hcoda1/9/qdai41/scratch/cosmos/lingbot-va/checkpoints/lingbot-libero"
 
 va_libero_cfg.attn_window = 30
 va_libero_cfg.frame_chunk_size = 4
