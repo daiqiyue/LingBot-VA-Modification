@@ -1,0 +1,17 @@
+variants:
+  - name: nominal
+
+  - name: near_miss_eef_x_small
+    eef_delta: [0.02, 0.0, 0.0]
+    eef_preposition_steps: 80
+    eef_step_size: 0.01
+    eef_tolerance: 0.01
+
+  - name: systematic_cam_z_15
+    camera_rotate_deg: 15
+    camera_axis: z
+
+  - name: diverse_mix_1
+    eef_delta: [0.03, -0.02, 0.0]
+    camera_rotate_deg: 20
+    camera_axis: y

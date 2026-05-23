@@ -1,0 +1,6 @@
+success_threshold_pos: 1.0
+progress_threshold_neg: 0.5
+bucket_mix:
+  near_miss: 0.5
+  systematic: 0.3
+  diverse: 0.2

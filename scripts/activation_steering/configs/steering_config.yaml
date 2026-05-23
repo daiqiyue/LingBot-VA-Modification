@@ -1,0 +1,7 @@
+layers: [22]
+alpha: 0.05
+alpha_schedule: linear_decay
+modality: both
+apply_on: transient_only
+video_steps: 20
+action_steps: 50

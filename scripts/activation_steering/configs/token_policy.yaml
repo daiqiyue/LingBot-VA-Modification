@@ -1,0 +1,4 @@
+video_frame_focus: first2
+action_frame_focus: first_group
+exclude_timestep0_condition_tokens: true
+pooling: mean

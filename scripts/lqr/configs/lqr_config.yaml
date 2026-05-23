@@ -1,0 +1,10 @@
+svd_dir: outputs/lqr/svd_run
+jac_dir_act: A_tilde_lingbot
+lambda_scale: 1.0
+q_scale: 10000.0
+r_scale: 75000.0
+qf_scale: 1.0
+modality: action
+apply_on: transient_only
+video_steps: 20
+action_steps: 50

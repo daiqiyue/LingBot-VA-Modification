@@ -123,6 +123,127 @@ def _quat_multiply(quat_a, quat_b):
     )
 
 
+def _normalize(vec, eps=1e-8):
+    vec = np.asarray(vec, dtype=np.float64)
+    norm = np.linalg.norm(vec)
+    if norm < eps:
+        raise ValueError(f"Cannot normalize near-zero vector: {vec.tolist()}")
+    return vec / norm
+
+
+def _rotate_vector(vec, axis, angle_rad):
+    """
+    Rodrigues rotation formula for rotating a 3D vector around a world axis.
+    """
+    vec = np.asarray(vec, dtype=np.float64)
+    axis = _normalize(axis)
+    cos_a = np.cos(angle_rad)
+    sin_a = np.sin(angle_rad)
+    return vec * cos_a + np.cross(axis, vec) * sin_a + axis * np.dot(axis, vec) * (1.0 - cos_a)
+
+
+def _rotmat_to_quat_wxyz(rotmat):
+    """
+    Convert a 3x3 rotation matrix to MuJoCo wxyz quaternion.
+    """
+    m = np.asarray(rotmat, dtype=np.float64)
+    trace = np.trace(m)
+    if trace > 0:
+        s = np.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * s
+        x = (m[2, 1] - m[1, 2]) / s
+        y = (m[0, 2] - m[2, 0]) / s
+        z = (m[1, 0] - m[0, 1]) / s
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = np.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+        w = (m[2, 1] - m[1, 2]) / s
+        x = 0.25 * s
+        y = (m[0, 1] + m[1, 0]) / s
+        z = (m[0, 2] + m[2, 0]) / s
+    elif m[1, 1] > m[2, 2]:
+        s = np.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+        w = (m[0, 2] - m[2, 0]) / s
+        x = (m[0, 1] + m[1, 0]) / s
+        y = 0.25 * s
+        z = (m[1, 2] + m[2, 1]) / s
+    else:
+        s = np.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+        w = (m[1, 0] - m[0, 1]) / s
+        x = (m[0, 2] + m[2, 0]) / s
+        y = (m[1, 2] + m[2, 1]) / s
+        z = 0.25 * s
+    quat = np.array([w, x, y, z], dtype=np.float64)
+    return quat / np.linalg.norm(quat)
+
+
+def _lookat_quat_wxyz(cam_pos, target_pos, world_up=np.array([0.0, 0.0, 1.0], dtype=np.float64)):
+    """
+    Build camera quaternion so that the camera forward axis points to target_pos.
+    MuJoCo camera looks along local -Z, with local +Y as up.
+    """
+    cam_pos = np.asarray(cam_pos, dtype=np.float64)
+    target_pos = np.asarray(target_pos, dtype=np.float64)
+    forward = _normalize(target_pos - cam_pos)
+    cam_z = -forward
+
+    world_up = np.asarray(world_up, dtype=np.float64)
+    cam_x = np.cross(world_up, cam_z)
+    if np.linalg.norm(cam_x) < 1e-6:
+        # Degenerate when forward is parallel to world_up
+        alt_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        cam_x = np.cross(alt_up, cam_z)
+    cam_x = _normalize(cam_x)
+    cam_y = _normalize(np.cross(cam_z, cam_x))
+    rotmat = np.column_stack([cam_x, cam_y, cam_z])
+    return _rotmat_to_quat_wxyz(rotmat)
+
+
+def _find_body_pos_by_keywords(env_in, include_keywords):
+    model = env_in.sim.model
+    data = env_in.sim.data
+    include_keywords = tuple(k.lower() for k in include_keywords)
+    candidates = []
+    for body_id in range(model.nbody):
+        body_name = model.body_id2name(body_id)
+        if not body_name:
+            continue
+        body_name_l = body_name.lower()
+        if all(k in body_name_l for k in include_keywords):
+            candidates.append((len(body_name), body_id, body_name))
+    if not candidates:
+        return None, None
+    _, body_id, body_name = sorted(candidates, key=lambda x: (x[0], x[2]))[0]
+    return np.asarray(data.body_xpos[body_id], dtype=np.float64).copy(), body_name
+
+
+def _infer_agentview_orbit_center_and_target(env_in):
+    robot_base_pos, robot_name = _find_body_pos_by_keywords(env_in, ["robot0", "base"])
+    if robot_base_pos is None:
+        robot_base_pos, robot_name = _find_body_pos_by_keywords(env_in, ["robot0"])
+
+    table_pos, table_name = _find_body_pos_by_keywords(env_in, ["table"])
+
+    if robot_base_pos is not None and table_pos is not None:
+        center = 0.5 * (robot_base_pos + table_pos)
+        target = center.copy()
+        target[2] = max(robot_base_pos[2], table_pos[2]) + 0.08
+        reason = f"robot={robot_name}, table={table_name}"
+        return center, target, reason
+    if table_pos is not None:
+        center = table_pos.copy()
+        target = table_pos.copy()
+        target[2] += 0.10
+        reason = f"table={table_name}"
+        return center, target, reason
+    if robot_base_pos is not None:
+        center = robot_base_pos.copy()
+        target = robot_base_pos.copy()
+        target[2] += 0.18
+        reason = f"robot={robot_name}"
+        return center, target, reason
+    return None, None, "no robot/table body found"
+
+
 def apply_agentview_camera_rotation(env_in, rotate_deg=None, rotate_axis="z"):
     if rotate_deg is None or rotate_deg == 0:
         return
@@ -136,15 +257,32 @@ def apply_agentview_camera_rotation(env_in, rotate_deg=None, rotate_axis="z"):
         raise ValueError(f"agentview_camera_rotate_axis must be one of x/y/z, got {rotate_axis}")
 
     cam_id = env_in.sim.model.camera_name2id("agentview")
+    old_cam_pos = np.asarray(env_in.sim.model.cam_pos[cam_id], dtype=np.float64).copy()
     old_quat = np.asarray(env_in.sim.model.cam_quat[cam_id], dtype=np.float64)
-    delta_quat = _axis_angle_to_quat(axis_by_name[rotate_axis], np.deg2rad(rotate_deg))
-    new_quat = _quat_multiply(delta_quat, old_quat)
-    new_quat = new_quat / np.linalg.norm(new_quat)
+    center_pos, target_pos, anchor_reason = _infer_agentview_orbit_center_and_target(env_in)
+    if center_pos is None or target_pos is None:
+        delta_quat = _axis_angle_to_quat(axis_by_name[rotate_axis], np.deg2rad(rotate_deg))
+        new_quat = _quat_multiply(delta_quat, old_quat)
+        new_quat = new_quat / np.linalg.norm(new_quat)
+        env_in.sim.model.cam_quat[cam_id] = new_quat
+        env_in.sim.forward()
+        print(
+            f"Fallback self-rotation (anchor not found: {anchor_reason}): "
+            f"{rotate_deg} deg around {rotate_axis}-axis, quat {old_quat.tolist()} -> {new_quat.tolist()}"
+        )
+        return
+
+    orbit_axis = axis_by_name[rotate_axis]
+    rel_vec = old_cam_pos - center_pos
+    new_cam_pos = center_pos + _rotate_vector(rel_vec, orbit_axis, np.deg2rad(rotate_deg))
+    new_quat = _lookat_quat_wxyz(new_cam_pos, target_pos)
+    env_in.sim.model.cam_pos[cam_id] = new_cam_pos
     env_in.sim.model.cam_quat[cam_id] = new_quat
     env_in.sim.forward()
     print(
-        f"Rotated agentview camera by {rotate_deg} deg around {rotate_axis}-axis: "
-        f"{old_quat.tolist()} -> {new_quat.tolist()}"
+        f"Orbited agentview camera by {rotate_deg} deg around {rotate_axis}-axis "
+        f"(anchor: {anchor_reason}). cam_pos {old_cam_pos.tolist()} -> {new_cam_pos.tolist()}, "
+        f"cam_quat {old_quat.tolist()} -> {new_quat.tolist()}, lookat={target_pos.tolist()}"
     )
 
 
@@ -463,14 +601,14 @@ def main():
         "--agentview-camera-rotate-deg",
         type=float,
         default=None,
-        help="Rotate the LIBERO third-person agentview camera by this angle in degrees.",
+        help="Orbit the LIBERO third-person agentview camera around robot/table anchor by this angle in degrees.",
     )
     parser.add_argument(
         "--agentview-camera-rotate-axis",
         type=str,
         choices=["x", "y", "z"],
         default="z",
-        help="World axis used by --agentview-camera-rotate-deg.",
+        help="World axis used for the orbit defined by --agentview-camera-rotate-deg.",
     )
     args = parser.parse_args()
     run(**vars(args))
