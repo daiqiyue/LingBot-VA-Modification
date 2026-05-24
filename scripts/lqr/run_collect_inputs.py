@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -331,6 +332,26 @@ def _obs_payload_from_raw_with_perturb(
     return {"obs": [{cam_keys[0]: agent, cam_keys[1]: eye}]}
 
 
+def _compose_video_frame(agent_img: np.ndarray, eye_img: np.ndarray) -> np.ndarray:
+    return np.ascontiguousarray(np.concatenate([agent_img, eye_img], axis=1))
+
+
+def _write_video_mp4(frames: List[np.ndarray], path: Path, fps: int) -> None:
+    if not frames:
+        return
+    h, w = frames[0].shape[:2]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), float(fps), (w, h))
+    if not writer.isOpened():
+        raise RuntimeError(f"failed to open video writer for {path}")
+    try:
+        for frame in frames:
+            if frame.shape[:2] != (h, w):
+                raise ValueError(f"inconsistent frame shape in video frames: expected {(h, w)}, got {frame.shape[:2]}")
+            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    finally:
+        writer.release()
+
+
 def _variant_list(spec_path: Optional[Path]) -> List[Dict[str, Any]]:
     if spec_path is None:
         return [{"name": "nominal"}]
@@ -356,6 +377,7 @@ def _run_one_trajectory(
     top_k: int,
     variant: Dict[str, Any],
     rng: Optional[np.random.Generator] = None,
+    save_video: bool = True,
     max_env_steps: int = 800,
 ):
     env.reset()
@@ -383,6 +405,7 @@ def _run_one_trajectory(
     infer_idx = 0
     first = True
     captures: List[Dict[str, Any]] = []
+    video_frames: List[np.ndarray] = []
 
     while env.env.timestep < max_env_steps:
         obs_payload = _obs_payload_from_raw_with_perturb(
@@ -391,6 +414,9 @@ def _run_one_trajectory(
             image_noise_sigma=variant.get("image_noise_sigma"),
             rng=rng,
         )
+        if save_video:
+            obs_view = obs_payload["obs"][0]
+            video_frames.append(_compose_video_frame(obs_view[cam_keys[0]], obs_view[cam_keys[1]]))
         frame_st_id = int(server.frame_st_id)
         tracer.reset_chunk()
         actions, _ = server._infer(obs_payload, frame_st_id=frame_st_id)
@@ -413,7 +439,10 @@ def _run_one_trajectory(
                 if done:
                     break
                 if (j + 1) % action_per_frame == 0:
-                    key_frame_list.append(_obs_payload_from_raw(raw_obs, cam_keys)["obs"][0])
+                    key_frame_obs = _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
+                    key_frame_list.append(key_frame_obs)
+                    if save_video:
+                        video_frames.append(_compose_video_frame(key_frame_obs[cam_keys[0]], key_frame_obs[cam_keys[1]]))
             if done:
                 break
         first = False
@@ -423,7 +452,7 @@ def _run_one_trajectory(
         if key_frame_list:
             server._compute_kv_cache({"obs": key_frame_list, "state": actions})
 
-    return bool(done), infer_idx, captures
+    return bool(done), infer_idx, captures, video_frames
 
 
 def main() -> None:
@@ -439,12 +468,16 @@ def main() -> None:
     parser.add_argument("--perturb-spec", type=Path, required=True)
     parser.add_argument("--target-variants", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--video-fps", type=int, default=20)
+    parser.add_argument("--disable-video", action="store_true", help="Disable trajectory video generation in collect stage.")
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     records_dir = args.out_dir / "trajectory_records"
     records_dir.mkdir(parents=True, exist_ok=True)
+    videos_dir = args.out_dir / "videos"
+    videos_dir.mkdir(parents=True, exist_ok=True)
 
     bench_cls = benchmark.get_benchmark_dict()[args.libero_benchmark]
     bench = bench_cls()
@@ -485,6 +518,7 @@ def main() -> None:
 
     cam_keys = list(server.job_config.obs_cam_keys)
     rows: List[Dict[str, Any]] = []
+    save_video = not bool(args.disable_video)
     try:
         for variant_idx, variant in enumerate(variants):
             variant_name = str(variant["name"])
@@ -494,7 +528,7 @@ def main() -> None:
                     init_state = init_states[episode_idx % init_states.shape[0]]
                     rng_seed = int(args.seed) + variant_idx * 100000 + episode_idx
                     rng = np.random.default_rng(seed=rng_seed)
-                    success, infer_calls, captures = _run_one_trajectory(
+                    success, infer_calls, captures, video_frames = _run_one_trajectory(
                         server=server,
                         tracer=tracer,
                         env=env,
@@ -504,9 +538,18 @@ def main() -> None:
                         top_k=int(args.top_k_inference_per_traj),
                         variant=variant,
                         rng=rng,
+                        save_video=save_video,
                     )
                     rec_name = f"{variant_name}__ep{episode_idx:04d}.pt"
                     rec_path = records_dir / rec_name
+                    video_path: Optional[Path] = None
+                    if save_video and video_frames:
+                        safe_variant = variant_name.replace("/", "_")
+                        variant_video_dir = videos_dir / safe_variant
+                        variant_video_dir.mkdir(parents=True, exist_ok=True)
+                        outcome = "success" if success else "fail"
+                        video_path = variant_video_dir / f"ep{episode_idx:04d}_{outcome}.mp4"
+                        _write_video_mp4(video_frames, video_path, fps=int(args.video_fps))
                     torch.save(
                         {
                             "variant_name": variant_name,
@@ -520,6 +563,7 @@ def main() -> None:
                             "layers": layers,
                             "mode": args.mode,
                             "prompt": task_lang,
+                            "video_path": str(video_path.resolve()) if video_path is not None else None,
                         },
                         rec_path,
                     )
@@ -533,11 +577,12 @@ def main() -> None:
                             "num_infer_calls": int(infer_calls),
                             "num_captured": int(len(captures)),
                             "path": str(rec_path.resolve()),
+                            "video_path": str(video_path.resolve()) if video_path is not None else None,
                         }
                     )
                     print(
                         f"[collect] variant={variant_name} ep={episode_idx} success={success} "
-                        f"infer_calls={infer_calls} captured={len(captures)}"
+                        f"infer_calls={infer_calls} captured={len(captures)} video={'yes' if video_path else 'no'}"
                     )
             finally:
                 env.close()
@@ -555,6 +600,8 @@ def main() -> None:
         "selected_timesteps": selected_timesteps,
         "layers": layers,
         "mode": args.mode,
+        "video_fps": int(args.video_fps),
+        "video_enabled": bool(save_video),
         "variants": variants,
         "records": rows,
     }
