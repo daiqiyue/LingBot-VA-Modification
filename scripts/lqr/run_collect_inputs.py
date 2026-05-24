@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
+import imageio
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -267,6 +267,8 @@ def _apply_agentview_camera_rotation(env_in: OffScreenRenderEnv, rotate_deg: Opt
 def _apply_eef_delta_preposition(
     env_in: OffScreenRenderEnv,
     raw_obs: Dict[str, Any],
+    cam_keys: Optional[List[str]] = None,
+    video_frames: Optional[List[np.ndarray]] = None,
     eef_delta: Optional[List[float]] = None,
     max_steps: int = 80,
     step_size: float = 0.01,
@@ -286,6 +288,9 @@ def _apply_eef_delta_preposition(
         delta = err if dist <= float(step_size) else err / dist * float(step_size)
         action = np.array([delta[0], delta[1], delta[2], 0.0, 0.0, 0.0, -1.0], dtype=np.float32)
         obs, _, done, _ = env_in.step(action)
+        if video_frames is not None and cam_keys is not None:
+            obs_view = _obs_payload_from_raw(obs, cam_keys)["obs"][0]
+            video_frames.append(_compose_video_frame(obs_view[cam_keys[0]], obs_view[cam_keys[1]]))
         if done:
             break
     return obs
@@ -355,16 +360,12 @@ def _write_video_mp4(frames: List[np.ndarray], path: Path, fps: int) -> None:
     if not frames:
         return
     h, w = frames[0].shape[:2]
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), float(fps), (w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f"failed to open video writer for {path}")
-    try:
-        for frame in frames:
-            if frame.shape[:2] != (h, w):
-                raise ValueError(f"inconsistent frame shape in video frames: expected {(h, w)}, got {frame.shape[:2]}")
-            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    finally:
-        writer.release()
+    final_frames: List[np.ndarray] = []
+    for frame in frames:
+        if frame.shape[:2] != (h, w):
+            raise ValueError(f"inconsistent frame shape in video frames: expected {(h, w)}, got {frame.shape[:2]}")
+        final_frames.append(frame.astype(np.uint8, copy=False))
+    imageio.mimsave(str(path), final_frames, fps=int(fps))
 
 
 def _variant_list(spec_path: Optional[Path]) -> List[Dict[str, Any]]:
@@ -406,14 +407,6 @@ def _run_one_trajectory(
     )
     if variant.get("camera_rotate_deg") not in (None, 0):
         raw_obs, _, _, _ = env.step([0.0] * 7)
-    raw_obs = _apply_eef_delta_preposition(
-        env,
-        raw_obs,
-        eef_delta=variant.get("eef_delta"),
-        max_steps=int(variant.get("eef_preposition_steps", 80)),
-        step_size=float(variant.get("eef_step_size", 1.0)),
-        tolerance=float(variant.get("eef_tolerance", 0.01)),
-    )
 
     server._reset(prompt=prompt)
     first_obs = _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
@@ -422,6 +415,17 @@ def _run_one_trajectory(
     first = True
     captures: List[Dict[str, Any]] = []
     video_frames: List[np.ndarray] = []
+    raw_obs = _apply_eef_delta_preposition(
+        env,
+        raw_obs,
+        cam_keys=cam_keys if save_video else None,
+        video_frames=video_frames if save_video else None,
+        eef_delta=variant.get("eef_delta"),
+        max_steps=int(variant.get("eef_preposition_steps", 80)),
+        step_size=float(variant.get("eef_step_size", 0.01)),
+        tolerance=float(variant.get("eef_tolerance", 0.01)),
+    )
+    first_obs = _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
 
     while env.env.timestep < max_env_steps:
         infer_obs = _apply_agentview_noise_to_obs(
@@ -431,8 +435,6 @@ def _run_one_trajectory(
             rng=rng,
         )
         obs_payload = {"obs": [infer_obs]}
-        if save_video:
-            video_frames.append(_compose_video_frame(infer_obs[cam_keys[0]], infer_obs[cam_keys[1]]))
         frame_st_id = int(server.frame_st_id)
         tracer.reset_chunk()
         actions, _ = server._infer(obs_payload, frame_st_id=frame_st_id)
@@ -492,7 +494,7 @@ def main() -> None:
     parser.add_argument("--perturb-spec", type=Path, required=True)
     parser.add_argument("--target-variants", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--video-fps", type=int, default=20)
+    parser.add_argument("--video-fps", type=int, default=60)
     parser.add_argument("--disable-video", action="store_true", help="Disable trajectory video generation in collect stage.")
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args()
