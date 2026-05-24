@@ -12,6 +12,26 @@ import imageio
 import cv2
 
 
+def _apply_agentview_noise_to_obs(
+    obs_dict,
+    sigma,
+    rng: np.random.Generator,
+):
+    if sigma is None:
+        return obs_dict
+    sigma_f = float(sigma)
+    if sigma_f <= 0:
+        return obs_dict
+    out = {
+        "observation.images.agentview_rgb": obs_dict["observation.images.agentview_rgb"].copy(),
+        "observation.images.eye_in_hand_rgb": obs_dict["observation.images.eye_in_hand_rgb"].copy(),
+    }
+    img = out["observation.images.agentview_rgb"]
+    noise = rng.normal(loc=0.0, scale=sigma_f, size=img.shape).astype(np.float32)
+    out["observation.images.agentview_rgb"] = np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+    return out
+
+
 def save_video(
     real_obs_list,
     save_path,
@@ -375,6 +395,8 @@ def run_one(
     eef_tolerance=0.01,
     agentview_camera_rotate_deg=None,
     agentview_camera_rotate_axis="z",
+    agentview_noise_sigma=None,
+    agentview_noise_seed_base=0,
 ):
     benchmark_dict = benchmark.get_benchmark_dict()
     benchmark_instance = benchmark_dict[libero_benchmark]()
@@ -401,6 +423,7 @@ def run_one(
         raw_obs, _, _, _ = cur_env.step([0.] * 7)
     full_obs_list = []
     phase_labels = []
+    noise_rng = np.random.default_rng(seed=int(agentview_noise_seed_base) + int(episode_idx))
     raw_obs = apply_eef_delta_preposition(
         cur_env,
         raw_obs,
@@ -418,7 +441,8 @@ def run_one(
     done = False
     first = True
     while cur_env.env.timestep < 800:
-        ret = model.infer(dict(obs=first_obs, prompt=prompt))
+        infer_obs = _apply_agentview_noise_to_obs(first_obs, sigma=agentview_noise_sigma, rng=noise_rng)
+        ret = model.infer(dict(obs=infer_obs, prompt=prompt))
         action = ret['action']
 
         key_frame_list = []
@@ -434,7 +458,9 @@ def run_one(
                 if (j+1) % action_per_frame == 0:
                     full_obs_list.append(observes)
                     phase_labels.append("inference")
-                    key_frame_list.append(observes)
+                    key_frame_list.append(
+                        _apply_agentview_noise_to_obs(observes, sigma=agentview_noise_sigma, rng=noise_rng)
+                    )
 
             if done:
                 break
@@ -474,6 +500,8 @@ def run(
     eef_tolerance=0.01,
     agentview_camera_rotate_deg=None,
     agentview_camera_rotate_axis="z",
+    agentview_noise_sigma=None,
+    agentview_noise_seed_base=0,
 ):
     '''
         task_range: [start, end) for splitting tasks
@@ -517,6 +545,8 @@ def run(
                 eef_tolerance=eef_tolerance,
                 agentview_camera_rotate_deg=agentview_camera_rotate_deg,
                 agentview_camera_rotate_axis=agentview_camera_rotate_axis,
+                agentview_noise_sigma=agentview_noise_sigma,
+                agentview_noise_seed_base=agentview_noise_seed_base,
             )
             succ_num += res_i
             succ_rate = succ_num / (episode_idx + 1)
@@ -609,6 +639,18 @@ def main():
         choices=["x", "y", "z"],
         default="z",
         help="World axis used for the orbit defined by --agentview-camera-rotate-deg.",
+    )
+    parser.add_argument(
+        "--agentview-noise-sigma",
+        type=float,
+        default=None,
+        help="Additive gaussian sigma (pixel units) on third-person agentview image before policy inference.",
+    )
+    parser.add_argument(
+        "--agentview-noise-seed-base",
+        type=int,
+        default=0,
+        help="Per-episode gaussian noise seed base.",
     )
     args = parser.parse_args()
     run(**vars(args))

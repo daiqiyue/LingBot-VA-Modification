@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH -J lingbot_lqr
+#SBATCH -J lingbot_lqr_camera
 #SBATCH -A gts-gchou3
 #SBATCH -N 1
 #SBATCH --gres=gpu:h200:1
 #SBATCH -t 20:00:00
-#SBATCH -o Lqr_Report-%j.out
+#SBATCH -o Lqr_Camera_Report-%j.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=qdai41@gatech.edu
 
@@ -24,7 +24,7 @@ export NUM_EPISODES="${NUM_EPISODES:-10}"
 export TOPK_INFER_PER_TRAJ="${TOPK_INFER_PER_TRAJ:-10}"
 export SELECTED_TIMESTEPS="${SELECTED_TIMESTEPS:-0,10,20,30,40}"
 export COLLECT_MODE="${COLLECT_MODE:-action}"
-export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_init_pos.yaml}"
+export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_camera.yaml}"
 export TARGET_VARIANTS="${TARGET_VARIANTS:-}"
 export PAIR_SEED="${PAIR_SEED:-0}"
 export NUM_SAMPLES="${NUM_SAMPLES:-200}"
@@ -42,7 +42,7 @@ export SKIP_EVAL="${SKIP_EVAL:-0}"
 # Optional prompt override for eval
 export PROMPT="${PROMPT:-}"
 
-echo "Running LQR pipeline with:"
+echo "Running CAMERA-LQR pipeline with:"
 echo "  PERTURB_SPEC=${PERTURB_SPEC}"
 echo "  NUM_EPISODES=${NUM_EPISODES}, TOPK=${TOPK_INFER_PER_TRAJ}"
 echo "  SELECTED_TIMESTEPS=${SELECTED_TIMESTEPS}"

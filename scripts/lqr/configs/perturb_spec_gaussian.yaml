@@ -1,0 +1,11 @@
+variants:
+  - name: nominal
+
+  - name: gaussian_agentview_sigma_15
+    image_noise_sigma: 15.0
+
+  - name: gaussian_agentview_sigma_30
+    image_noise_sigma: 30.0
+
+  - name: gaussian_agentview_sigma_45
+    image_noise_sigma: 45.0

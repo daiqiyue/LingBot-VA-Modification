@@ -1,61 +1,35 @@
 import argparse
 import os
 
-from scripts.lqr.common import maybe_load_yaml
+import torch
+
 from scripts.lqr.lqr_injector import LQRInjector
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run Lingbot server with runtime LQR patch.")
+    parser = argparse.ArgumentParser(description="Run Lingbot server with LQR activation steering.")
     parser.add_argument("--config-name", type=str, default="libero")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--save_root", type=str, default=None)
-
     parser.add_argument("--svd-dir", type=str, required=True)
-    parser.add_argument("--jac-dir-act", type=str, required=True)
+    parser.add_argument("--jac-dir-act", type=str, default="A_tilde_lingbot")
     parser.add_argument("--lambda-scale", type=float, default=1.0)
     parser.add_argument("--q-scale", type=float, default=10000.0)
     parser.add_argument("--r-scale", type=float, default=75000.0)
     parser.add_argument("--qf-scale", type=float, default=1.0)
-    parser.add_argument("--modality", type=str, choices=["video", "action", "both"], default="both")
-    parser.add_argument(
-        "--apply-on",
-        type=str,
-        choices=["transient_only", "include_cache_write"],
-        default="transient_only",
-    )
-    parser.add_argument("--video-steps", type=int, default=20)
-    parser.add_argument("--action-steps", type=int, default=50)
-    parser.add_argument("--lqr-config", type=str, default=None, help="Optional YAML/JSON config overrides.")
     return parser.parse_args()
 
 
 def _build_injector(args: argparse.Namespace) -> LQRInjector:
-    merged = {
-        "svd_dir": args.svd_dir,
-        "jac_dir_act": args.jac_dir_act,
-        "lambda_scale": args.lambda_scale,
-        "q_scale": args.q_scale,
-        "r_scale": args.r_scale,
-        "qf_scale": args.qf_scale,
-        "modality": args.modality,
-        "apply_on": args.apply_on,
-        "video_steps": args.video_steps,
-        "action_steps": args.action_steps,
-    }
-    if args.lqr_config:
-        merged.update(maybe_load_yaml(args.lqr_config))
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     return LQRInjector(
-        svd_dir=str(merged["svd_dir"]),
-        jac_dir_act=str(merged["jac_dir_act"]),
-        lambda_scale=float(merged["lambda_scale"]),
-        q_scale=float(merged["q_scale"]),
-        r_scale=float(merged["r_scale"]),
-        qf_scale=float(merged["qf_scale"]),
-        modality=str(merged["modality"]),
-        apply_on=str(merged["apply_on"]),
-        video_steps=int(merged["video_steps"]),
-        action_steps=int(merged["action_steps"]),
+        svd_dir=args.svd_dir,
+        jac_dir_act=args.jac_dir_act,
+        lambda_scale=args.lambda_scale,
+        q_scale=args.q_scale,
+        r_scale=args.r_scale,
+        qf_scale=args.qf_scale,
+        device=device,
     )
 
 
@@ -92,7 +66,6 @@ def main() -> None:
 
     base_server.VA_Server.__init__ = patched_init
     base_server.VA_Server._infer = patched_infer
-
     try:
         base_server.run(args)
     finally:

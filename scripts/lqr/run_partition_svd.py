@@ -55,8 +55,7 @@ class LingbotActivationTracer:
         return not action_mode
 
     def register_hooks(self, transformer: torch.nn.Module) -> None:
-        blocks = transformer.blocks
-        for idx, block in enumerate(blocks):
+        for idx, block in enumerate(transformer.blocks):
             if idx not in self.layers:
                 continue
             self._hook_handles.append(block.register_forward_hook(self._hook_fn(idx)))
@@ -100,7 +99,6 @@ def _build_server(config_name: str):
     _ensure_dist_env()
     if not dist.is_initialized():
         init_distributed(world_size=1, local_rank=0, rank=0)
-
     cfg = copy.deepcopy(VA_CONFIGS[config_name])
     cfg.rank = 0
     cfg.local_rank = 0
@@ -111,23 +109,46 @@ def _build_server(config_name: str):
 def _obs_from_npz(npz_obj, idx: int, cam_keys: List[str]) -> Dict:
     cam0 = npz_obj["primary_images"][idx]
     cam1 = npz_obj["wrist_images"][idx]
-    return {
-        "obs": [
-            {
-                cam_keys[0]: np.ascontiguousarray(cam0),
-                cam_keys[1]: np.ascontiguousarray(cam1),
-            }
-        ]
-    }
+    return {"obs": [{cam_keys[0]: np.ascontiguousarray(cam0), cam_keys[1]: np.ascontiguousarray(cam1)}]}
 
 
 def _parse_int_csv(value: str) -> List[int]:
     return [int(x.strip()) for x in value.split(",") if x.strip()]
 
 
+def _collect_diffs_from_activation_pairs(
+    pos_payload: Dict,
+    neg_payload: Dict,
+    num_samples: int,
+) -> Tuple[Dict[Tuple[int, int], List[torch.Tensor]], str, List[int], List[int], int]:
+    pos_records = list(pos_payload.get("records", []))
+    neg_records = list(neg_payload.get("records", []))
+    n_total = min(int(num_samples), len(pos_records), len(neg_records))
+    if n_total <= 0:
+        raise ValueError("No activation pairs available for SVD.")
+
+    prompt = pos_payload.get("prompt") or neg_payload.get("prompt")
+    selected_timesteps = pos_payload.get("selected_timesteps") or neg_payload.get("selected_timesteps")
+    layers = pos_payload.get("layers") or neg_payload.get("layers")
+    if not selected_timesteps or not layers:
+        sample_keys = sorted(list(pos_records[0]["activations"].keys()))
+        layers = sorted({int(k[0]) for k in sample_keys})
+        selected_timesteps = sorted({int(k[1]) for k in sample_keys})
+
+    diffs: Dict[Tuple[int, int], List[torch.Tensor]] = {(l, t): [] for l in layers for t in selected_timesteps}
+    for i in range(n_total):
+        cap_pos = pos_records[i]["activations"]
+        cap_neg = neg_records[i]["activations"]
+        for key in diffs:
+            if key not in cap_pos or key not in cap_neg:
+                raise RuntimeError(f"Missing activation key {key} in activation-native pair index {i}")
+            diffs[key].append((cap_pos[key] - cap_neg[key]).float().cpu())
+    return diffs, str(prompt), list(layers), list(selected_timesteps), n_total
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Lingbot-native partition SVD for LQR.")
-    parser.add_argument("--pairs-dir", type=Path, required=True, help="Directory containing positive.npz and negative.npz.")
+    parser = argparse.ArgumentParser(description="Run Lingbot partition SVD for LQR.")
+    parser.add_argument("--pairs-dir", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--config-name", type=str, default="libero")
     parser.add_argument("--prompt", type=str, default=None)
@@ -143,85 +164,99 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    pos_path = args.pairs_dir / "positive.npz"
-    neg_path = args.pairs_dir / "negative.npz"
-    if not pos_path.exists() or not neg_path.exists():
-        raise FileNotFoundError(f"Expected positive/negative npz in {args.pairs_dir}")
-    pos = np.load(pos_path)
-    neg = np.load(neg_path)
+    pos_act = args.pairs_dir / "positive.pt"
+    neg_act = args.pairs_dir / "negative.pt"
+    activation_native = pos_act.exists() and neg_act.exists()
 
-    manifest_path = args.pairs_dir / "manifest.json"
-    prompt = args.prompt
-    if prompt is None and manifest_path.exists():
-        pair_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        prompt = pair_manifest.get("task_language")
-    if not prompt:
-        raise ValueError("Prompt is required. Pass --prompt or provide pairs manifest with task_language.")
+    if activation_native:
+        pos_payload = torch.load(pos_act, map_location="cpu", weights_only=False)
+        neg_payload = torch.load(neg_act, map_location="cpu", weights_only=False)
+        diffs, prompt_from_pairs, layers, selected_timesteps, n_total = _collect_diffs_from_activation_pairs(
+            pos_payload=pos_payload,
+            neg_payload=neg_payload,
+            num_samples=int(args.num_samples),
+        )
+        prompt = args.prompt or prompt_from_pairs
+        n_layers = max(layers) + 1
+        sampling_steps = max(selected_timesteps) + 1
+    else:
+        pos_path = args.pairs_dir / "positive.npz"
+        neg_path = args.pairs_dir / "negative.npz"
+        if not pos_path.exists() or not neg_path.exists():
+            raise FileNotFoundError(f"Expected positive/negative pair files in {args.pairs_dir}")
+        pos = np.load(pos_path)
+        neg = np.load(neg_path)
+        manifest_path = args.pairs_dir / "manifest.json"
+        prompt = args.prompt
+        if prompt is None and manifest_path.exists():
+            pair_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            prompt = pair_manifest.get("task_language") or pair_manifest.get("prompt")
+        if not prompt:
+            raise ValueError("Prompt is required. Pass --prompt or provide manifest with task_language/prompt.")
 
-    server = _build_server(args.config_name)
-    transformer = server.transformer
-    n_layers = len(transformer.blocks)
-    layers = _parse_int_csv(args.layers) if args.layers.strip() else list(range(n_layers))
-    selected_timesteps = _parse_int_csv(args.selected_timesteps)
-    tracer = LingbotActivationTracer(layers=layers, selected_timesteps=selected_timesteps, mode=args.mode)
-    tracer.register_hooks(transformer)
+        server = _build_server(args.config_name)
+        transformer = server.transformer
+        n_layers = len(transformer.blocks)
+        layers = _parse_int_csv(args.layers) if args.layers.strip() else list(range(n_layers))
+        selected_timesteps = _parse_int_csv(args.selected_timesteps)
+        tracer = LingbotActivationTracer(layers=layers, selected_timesteps=selected_timesteps, mode=args.mode)
+        tracer.register_hooks(transformer)
+        original_forward = transformer.forward
 
-    original_forward = transformer.forward
+        def patched_forward(*f_args, **f_kwargs):
+            action_mode = bool(f_kwargs.get("action_mode", False))
+            update_cache = int(f_kwargs.get("update_cache", 0))
+            tracer.begin_call(action_mode=action_mode, update_cache=update_cache)
+            try:
+                return original_forward(*f_args, **f_kwargs)
+            finally:
+                tracer.end_call()
 
-    def patched_forward(*f_args, **f_kwargs):
-        action_mode = bool(f_kwargs.get("action_mode", False))
-        update_cache = int(f_kwargs.get("update_cache", 0))
-        tracer.begin_call(action_mode=action_mode, update_cache=update_cache)
+        transformer.forward = patched_forward
+        cam_keys = list(server.job_config.obs_cam_keys)
+        n_total = int(min(args.num_samples, pos["primary_images"].shape[0], neg["primary_images"].shape[0]))
+        diffs = {(l, t): [] for l in layers for t in selected_timesteps}
         try:
-            return original_forward(*f_args, **f_kwargs)
+            for i in range(n_total):
+                obs_pos = _obs_from_npz(pos, i, cam_keys)
+                obs_neg = _obs_from_npz(neg, i, cam_keys)
+                server._reset(prompt=prompt)
+                tracer.reset_chunk()
+                server._infer(obs_pos, frame_st_id=0)
+                cap_pos = dict(tracer.captured)
+                server._reset(prompt=prompt)
+                tracer.reset_chunk()
+                server._infer(obs_neg, frame_st_id=0)
+                cap_neg = dict(tracer.captured)
+                for key in diffs:
+                    if key not in cap_pos or key not in cap_neg:
+                        raise RuntimeError(f"Missing activation key {key} at sample {i}.")
+                    diffs[key].append((cap_pos[key] - cap_neg[key]).float().cpu())
         finally:
-            tracer.end_call()
+            tracer.close()
+            transformer.forward = original_forward
 
-    transformer.forward = patched_forward
+        if args.mode == "action":
+            sampling_steps = int(server.job_config.action_num_inference_steps)
+        elif args.mode == "video":
+            sampling_steps = int(server.job_config.num_inference_steps)
+        else:
+            sampling_steps = int(max(server.job_config.num_inference_steps, server.job_config.action_num_inference_steps))
 
-    cam_keys = list(server.job_config.obs_cam_keys)
-    n_total = int(min(args.num_samples, pos["primary_images"].shape[0], neg["primary_images"].shape[0]))
-    diffs: Dict[Tuple[int, int], List[torch.Tensor]] = {(l, t): [] for l in layers for t in selected_timesteps}
-
-    try:
-        for i in range(n_total):
-            obs_pos = _obs_from_npz(pos, i, cam_keys)
-            obs_neg = _obs_from_npz(neg, i, cam_keys)
-
-            server._reset(prompt=prompt)
-            tracer.reset_chunk()
-            server._infer(obs_pos, frame_st_id=0)
-            cap_pos = dict(tracer.captured)
-
-            server._reset(prompt=prompt)
-            tracer.reset_chunk()
-            server._infer(obs_neg, frame_st_id=0)
-            cap_neg = dict(tracer.captured)
-
-            for key in diffs:
-                if key not in cap_pos or key not in cap_neg:
-                    raise RuntimeError(
-                        f"Missing activation key {key} at sample {i}. "
-                        "Adjust --mode/--selected-timesteps to valid inference steps."
-                    )
-                diffs[key].append((cap_pos[key] - cap_neg[key]).float().cpu())
-    finally:
-        tracer.close()
-        transformer.forward = original_forward
-
+    t_to_idx = {t: i for i, t in enumerate(selected_timesteps)}
     partitions = [(l, l) for l in range(n_layers)]
     layer_to_part = list(range(n_layers))
-    t_to_idx = {t: i for i, t in enumerate(selected_timesteps)}
     c_means = torch.zeros(n_layers, len(selected_timesteps), args.k_target, dtype=torch.float32)
     projected_diffs: Dict[Tuple[int, int, int], torch.Tensor] = {}
 
     for (layer, t), delta_list in diffs.items():
+        if not delta_list:
+            raise RuntimeError(f"No deltas for layer={layer}, t={t}.")
         X = torch.stack(delta_list, dim=0)  # [N, D]
         n, d = X.shape
         if args.k_target > min(n, d):
             raise ValueError(
-                f"k_target={args.k_target} too large for key (layer={layer}, t={t}) with "
-                f"N={n}, D={d}. Reduce k_target or increase num-samples."
+                f"k_target={args.k_target} too large for (layer={layer}, t={t}) with N={n}, D={d}."
             )
         mean = X.mean(dim=0)
         Xc = X - mean
@@ -232,27 +267,21 @@ def main() -> None:
         p_idx = layer_to_part[layer]
         v_path = args.out_dir / f"V_part{p_idx}_layers{layer}-{layer}_t{t}_k{args.k_target}.pt"
         torch.save({"V": Vk}, v_path)
-
         c_means[layer, t_to_idx[t]] = (mean @ Vk).float()
         for s_idx in range(n):
             projected_diffs[(s_idx, layer, t)] = (X[s_idx] @ Vk).float().cpu()
 
-    if args.mode == "action":
-        sampling_steps = int(server.job_config.action_num_inference_steps)
-    elif args.mode == "video":
-        sampling_steps = int(server.job_config.num_inference_steps)
-    else:
-        sampling_steps = int(max(server.job_config.num_inference_steps, server.job_config.action_num_inference_steps))
     cfg = {
         "config_name": args.config_name,
         "prompt": prompt,
         "mode": args.mode,
         "selected_timesteps": selected_timesteps,
-        "sampling_steps": sampling_steps,
-        "L": n_layers,
+        "sampling_steps": int(sampling_steps),
+        "L": int(n_layers),
         "k_target": int(args.k_target),
         "partitions": partitions,
-        "num_samples": n_total,
+        "num_samples": int(n_total),
+        "input_type": "activation_pairs" if activation_native else "obs_pairs",
     }
     (args.out_dir / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     torch.save(

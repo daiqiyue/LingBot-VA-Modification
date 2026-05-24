@@ -1,32 +1,118 @@
 import argparse
+import copy
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
+import torch.distributed as dist
 from libero.libero import benchmark
 from libero.libero.envs import OffScreenRenderEnv
 
-from scripts.lqr.common import maybe_load_yaml
+from scripts.lqr.common import maybe_load_yaml, parse_int_list
 
 
-def _extract_obs(obs):
-    # Match Lingbot LIBERO client preprocessing.
-    agentview = np.ascontiguousarray(obs["agentview_image"][::-1])
-    eye_in_hand = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1])
+@dataclass
+class _CallCtx:
+    action_mode: bool
+    step_idx: int
+
+
+class LingbotActivationTracer:
+    def __init__(self, layers: List[int], selected_timesteps: List[int], mode: str) -> None:
+        self.layers = set(layers)
+        self.selected_timesteps = set(selected_timesteps)
+        self.mode = mode
+        self.video_step_idx = 0
+        self.action_step_idx = 0
+        self.current: Optional[_CallCtx] = None
+        self.captured: Dict[Tuple[int, int], torch.Tensor] = {}
+        self._hook_handles: List[torch.utils.hooks.RemovableHandle] = []
+
+    def reset_chunk(self) -> None:
+        self.video_step_idx = 0
+        self.action_step_idx = 0
+        self.current = None
+        self.captured = {}
+
+    def begin_call(self, action_mode: bool) -> None:
+        if action_mode:
+            step_idx = self.action_step_idx
+            self.action_step_idx += 1
+        else:
+            step_idx = self.video_step_idx
+            self.video_step_idx += 1
+        self.current = _CallCtx(action_mode=bool(action_mode), step_idx=step_idx)
+
+    def end_call(self) -> None:
+        self.current = None
+
+    def _mode_allow(self, action_mode: bool) -> bool:
+        if self.mode == "both":
+            return True
+        if self.mode == "action":
+            return action_mode
+        return not action_mode
+
+    def register_hooks(self, transformer_model: torch.nn.Module) -> None:
+        for idx, block in enumerate(transformer_model.blocks):
+            if idx not in self.layers:
+                continue
+            self._hook_handles.append(block.register_forward_hook(self._hook_fn(idx)))
+
+    def _hook_fn(self, layer_idx: int):
+        def hook(_module, _inputs, output):
+            if self.current is None:
+                return output
+            if not self._mode_allow(self.current.action_mode):
+                return output
+            if self.current.step_idx not in self.selected_timesteps:
+                return output
+            self.captured[(layer_idx, self.current.step_idx)] = output[0].detach().reshape(-1).float().cpu()
+            return output
+
+        return hook
+
+    def close(self) -> None:
+        for h in self._hook_handles:
+            h.remove()
+        self._hook_handles.clear()
+
+
+def _ensure_dist_env() -> None:
+    import os
+
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", str(12355 + (os.getpid() % 1000)))
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("LOCAL_RANK", "0")
+
+
+def _build_server(config_name: str):
+    from wan_va.configs import VA_CONFIGS
+    from wan_va.distributed.util import init_distributed
+    from wan_va.wan_va_server import VA_Server
+
+    _ensure_dist_env()
+    if not dist.is_initialized():
+        init_distributed(world_size=1, local_rank=0, rank=0)
+    cfg = copy.deepcopy(VA_CONFIGS[config_name])
+    cfg.rank = 0
+    cfg.local_rank = 0
+    cfg.world_size = 1
+    return VA_Server(cfg)
+
+
+def _extract_obs(raw_obs: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
+    agentview = np.ascontiguousarray(raw_obs["agentview_image"][::-1])
+    eye_in_hand = np.ascontiguousarray(raw_obs["robot0_eye_in_hand_image"][::-1])
     return agentview, eye_in_hand
 
 
-def _construct_env(env_args):
-    for _ in range(5):
-        try:
-            return OffScreenRenderEnv(**env_args)
-        except Exception:
-            continue
-    raise RuntimeError("Failed to construct OffScreenRenderEnv after retries")
-
-
-def _normalize(v, eps=1e-8):
+def _normalize(v: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     v = np.asarray(v, dtype=np.float64)
     n = np.linalg.norm(v)
     if n < eps:
@@ -34,16 +120,13 @@ def _normalize(v, eps=1e-8):
     return v / n
 
 
-def _axis_angle_to_quat(axis, angle_rad):
+def _axis_angle_to_quat(axis: np.ndarray, angle_rad: float) -> np.ndarray:
     axis = _normalize(axis)
     h = angle_rad / 2.0
-    return np.array(
-        [np.cos(h), axis[0] * np.sin(h), axis[1] * np.sin(h), axis[2] * np.sin(h)],
-        dtype=np.float64,
-    )
+    return np.array([np.cos(h), axis[0] * np.sin(h), axis[1] * np.sin(h), axis[2] * np.sin(h)], dtype=np.float64)
 
 
-def _quat_multiply(a, b):
+def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     aw, ax, ay, az = a
     bw, bx, by, bz = b
     return np.array(
@@ -57,7 +140,7 @@ def _quat_multiply(a, b):
     )
 
 
-def _rotate_vector(vec, axis, angle_rad):
+def _rotate_vector(vec: np.ndarray, axis: np.ndarray, angle_rad: float) -> np.ndarray:
     vec = np.asarray(vec, dtype=np.float64)
     axis = _normalize(axis)
     c = np.cos(angle_rad)
@@ -65,7 +148,7 @@ def _rotate_vector(vec, axis, angle_rad):
     return vec * c + np.cross(axis, vec) * s + axis * np.dot(axis, vec) * (1.0 - c)
 
 
-def _rotmat_to_quat_wxyz(rotmat):
+def _rotmat_to_quat_wxyz(rotmat: np.ndarray) -> np.ndarray:
     m = np.asarray(rotmat, dtype=np.float64)
     tr = np.trace(m)
     if tr > 0:
@@ -96,7 +179,7 @@ def _rotmat_to_quat_wxyz(rotmat):
     return q / np.linalg.norm(q)
 
 
-def _find_body_pos_by_keywords(env_in, include_keywords):
+def _find_body_pos_by_keywords(env_in: OffScreenRenderEnv, include_keywords: List[str]):
     model = env_in.sim.model
     data = env_in.sim.data
     include_keywords = tuple(k.lower() for k in include_keywords)
@@ -114,22 +197,22 @@ def _find_body_pos_by_keywords(env_in, include_keywords):
     return np.asarray(data.body_xpos[body_id], dtype=np.float64).copy(), body_name
 
 
-def _lookat_quat_wxyz(cam_pos, target_pos, world_up=np.array([0.0, 0.0, 1.0], dtype=np.float64)):
+def _lookat_quat_wxyz(cam_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
     cam_pos = np.asarray(cam_pos, dtype=np.float64)
     target_pos = np.asarray(target_pos, dtype=np.float64)
     forward = _normalize(target_pos - cam_pos)
     cam_z = -forward
+    world_up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
     cam_x = np.cross(world_up, cam_z)
     if np.linalg.norm(cam_x) < 1e-6:
-        alt_up = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-        cam_x = np.cross(alt_up, cam_z)
+        cam_x = np.cross(np.array([0.0, 1.0, 0.0], dtype=np.float64), cam_z)
     cam_x = _normalize(cam_x)
     cam_y = _normalize(np.cross(cam_z, cam_x))
     rotmat = np.column_stack([cam_x, cam_y, cam_z])
     return _rotmat_to_quat_wxyz(rotmat)
 
 
-def _infer_agentview_orbit_center_and_target(env_in):
+def _infer_agentview_orbit_center_and_target(env_in: OffScreenRenderEnv):
     robot_base_pos, _ = _find_body_pos_by_keywords(env_in, ["robot0", "base"])
     if robot_base_pos is None:
         robot_base_pos, _ = _find_body_pos_by_keywords(env_in, ["robot0"])
@@ -152,8 +235,8 @@ def _infer_agentview_orbit_center_and_target(env_in):
     return None, None
 
 
-def _apply_agentview_camera_rotation(env_in, rotate_deg: Optional[float], rotate_axis: str = "z"):
-    if rotate_deg is None or rotate_deg == 0:
+def _apply_agentview_camera_rotation(env_in: OffScreenRenderEnv, rotate_deg: Optional[float], rotate_axis: str = "z") -> None:
+    if rotate_deg in (None, 0):
         return
     axis_by_name = {
         "x": np.array([1.0, 0.0, 0.0], dtype=np.float64),
@@ -168,27 +251,25 @@ def _apply_agentview_camera_rotation(env_in, rotate_deg: Optional[float], rotate
     old_quat = np.asarray(env_in.sim.model.cam_quat[cam_id], dtype=np.float64)
     center, target = _infer_agentview_orbit_center_and_target(env_in)
     if center is None or target is None:
-        dq = _axis_angle_to_quat(axis, np.deg2rad(rotate_deg))
+        dq = _axis_angle_to_quat(axis, np.deg2rad(float(rotate_deg)))
         new_q = _quat_multiply(dq, old_quat)
-        new_q = new_q / np.linalg.norm(new_q)
-        env_in.sim.model.cam_quat[cam_id] = new_q
+        env_in.sim.model.cam_quat[cam_id] = new_q / np.linalg.norm(new_q)
         env_in.sim.forward()
         return
     rel_vec = old_cam_pos - center
-    new_cam_pos = center + _rotate_vector(rel_vec, axis, np.deg2rad(rotate_deg))
-    new_quat = _lookat_quat_wxyz(new_cam_pos, target)
+    new_cam_pos = center + _rotate_vector(rel_vec, axis, np.deg2rad(float(rotate_deg)))
     env_in.sim.model.cam_pos[cam_id] = new_cam_pos
-    env_in.sim.model.cam_quat[cam_id] = new_quat
+    env_in.sim.model.cam_quat[cam_id] = _lookat_quat_wxyz(new_cam_pos, target)
     env_in.sim.forward()
 
 
 def _apply_eef_delta_preposition(
-    env_in,
-    raw_obs,
-    eef_delta=None,
-    max_steps=80,
-    step_size=0.01,
-    tolerance=0.01,
+    env_in: OffScreenRenderEnv,
+    raw_obs: Dict[str, Any],
+    eef_delta: Optional[List[float]] = None,
+    max_steps: int = 80,
+    step_size: float = 0.01,
+    tolerance: float = 0.01,
 ):
     if eef_delta is None:
         return raw_obs
@@ -197,13 +278,11 @@ def _apply_eef_delta_preposition(
     obs = raw_obs
     for _ in range(int(max_steps)):
         cur_pos = np.asarray(obs["robot0_eef_pos"], dtype=np.float64)
-        error = target_pos - cur_pos
-        dist = float(np.linalg.norm(error))
+        err = target_pos - cur_pos
+        dist = float(np.linalg.norm(err))
         if dist <= float(tolerance):
             break
-        delta = error
-        if dist > float(step_size):
-            delta = error / dist * float(step_size)
+        delta = err if dist <= float(step_size) else err / dist * float(step_size)
         action = np.array([delta[0], delta[1], delta[2], 0.0, 0.0, 0.0, -1.0], dtype=np.float32)
         obs, _, done, _ = env_in.step(action)
         if done:
@@ -211,225 +290,276 @@ def _apply_eef_delta_preposition(
     return obs
 
 
-def _apply_noise(rng: np.random.Generator, img: np.ndarray, sigma: float) -> np.ndarray:
-    noise = rng.normal(loc=0.0, scale=float(sigma), size=img.shape).astype(np.float32)
-    return np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+def _construct_env(env_args: Dict[str, Any]) -> OffScreenRenderEnv:
+    for _ in range(5):
+        try:
+            return OffScreenRenderEnv(**env_args)
+        except Exception:
+            continue
+    raise RuntimeError("failed to construct OffScreenRenderEnv")
 
 
-def _load_variants(spec_path: Optional[Path], noise_sigma: Optional[float]) -> List[Dict[str, Any]]:
+def _obs_payload_from_raw(raw_obs: Dict[str, Any], cam_keys: List[str]) -> Dict[str, List[Dict[str, np.ndarray]]]:
+    agent, eye = _extract_obs(raw_obs)
+    return {"obs": [{cam_keys[0]: agent, cam_keys[1]: eye}]}
+
+
+def _apply_agentview_noise(
+    agent_img: np.ndarray,
+    sigma: Optional[float],
+    rng: Optional[np.random.Generator],
+) -> np.ndarray:
+    if sigma is None:
+        return agent_img
+    sigma_f = float(sigma)
+    if sigma_f <= 0:
+        return agent_img
+    if rng is None:
+        rng = np.random.default_rng(seed=0)
+    noise = rng.normal(loc=0.0, scale=sigma_f, size=agent_img.shape).astype(np.float32)
+    return np.clip(agent_img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+
+def _obs_payload_from_raw_with_perturb(
+    raw_obs: Dict[str, Any],
+    cam_keys: List[str],
+    image_noise_sigma: Optional[float],
+    rng: Optional[np.random.Generator],
+) -> Dict[str, List[Dict[str, np.ndarray]]]:
+    agent, eye = _extract_obs(raw_obs)
+    agent = _apply_agentview_noise(agent, sigma=image_noise_sigma, rng=rng)
+    return {"obs": [{cam_keys[0]: agent, cam_keys[1]: eye}]}
+
+
+def _variant_list(spec_path: Optional[Path]) -> List[Dict[str, Any]]:
     if spec_path is None:
-        if noise_sigma is None:
-            return [{"name": "nominal"}]
-        return [
-            {"name": "nominal"},
-            {"name": f"image_noise_sigma_{int(noise_sigma)}", "image_noise_sigma": float(noise_sigma)},
-        ]
+        return [{"name": "nominal"}]
     spec = maybe_load_yaml(str(spec_path))
     variants = spec.get("variants", [])
     if not variants:
-        raise ValueError("perturb spec must contain non-empty `variants` list")
+        raise ValueError("perturb spec must contain non-empty `variants`")
     out = []
-    for i, v in enumerate(variants):
+    for idx, v in enumerate(variants):
         if "name" not in v:
-            v["name"] = f"variant_{i}"
+            v["name"] = f"variant_{idx}"
         out.append(v)
     return out
 
 
-def _select_variants(
-    variants: List[Dict[str, Any]],
-    mode: str,
-    target_variants: Optional[str],
-) -> List[Dict[str, Any]]:
-    keep_names = None
-    if target_variants:
-        keep_names = {x.strip() for x in target_variants.split(",") if x.strip()}
-    selected = []
-    for v in variants:
-        name = v["name"]
-        if keep_names is not None and name not in keep_names:
-            continue
-        if mode == "nominal" and name != "nominal":
-            continue
-        if mode == "perturbed" and name == "nominal":
-            continue
-        selected.append(v)
-    if mode != "nominal" and not any(v["name"] == "nominal" for v in selected):
-        # Always include nominal for pair generation.
-        nominal = [v for v in variants if v["name"] == "nominal"]
-        if nominal:
-            selected = nominal + selected
-        else:
-            selected = [{"name": "nominal"}] + selected
-    if not selected:
-        raise ValueError("No variants selected after filtering.")
-    return selected
-
-
-def _collect_variant_samples(
-    env_args: Dict[str, Any],
-    init_states: np.ndarray,
-    sample_init_ids: List[int],
-    warmup_steps: int,
+def _run_one_trajectory(
+    server,
+    tracer: LingbotActivationTracer,
+    env: OffScreenRenderEnv,
+    init_state: np.ndarray,
+    prompt: str,
+    cam_keys: List[str],
+    top_k: int,
     variant: Dict[str, Any],
-    seed: int,
+    rng: Optional[np.random.Generator] = None,
+    max_env_steps: int = 800,
 ):
-    rng = np.random.default_rng(seed=seed)
-    env = _construct_env(env_args)
-    primary = []
-    wrist = []
-    proprios = []
-    try:
-        for init_idx in sample_init_ids:
-            env.reset()
-            raw_obs = env.set_init_state(init_states[init_idx])
-            for _ in range(warmup_steps):
-                raw_obs, _, _, _ = env.step([0.0] * 7)
+    env.reset()
+    raw_obs = env.set_init_state(init_state)
+    for _ in range(5):
+        raw_obs, _, _, _ = env.step([0.0] * 7)
+    _apply_agentview_camera_rotation(
+        env,
+        rotate_deg=variant.get("camera_rotate_deg"),
+        rotate_axis=str(variant.get("camera_axis", "z")),
+    )
+    if variant.get("camera_rotate_deg") not in (None, 0):
+        raw_obs, _, _, _ = env.step([0.0] * 7)
+    raw_obs = _apply_eef_delta_preposition(
+        env,
+        raw_obs,
+        eef_delta=variant.get("eef_delta"),
+        max_steps=int(variant.get("eef_preposition_steps", 80)),
+        step_size=float(variant.get("eef_step_size", 0.01)),
+        tolerance=float(variant.get("eef_tolerance", 0.01)),
+    )
 
-            _apply_agentview_camera_rotation(
-                env,
-                rotate_deg=variant.get("camera_rotate_deg"),
-                rotate_axis=str(variant.get("camera_axis", "z")),
+    server._reset(prompt=prompt)
+    done = False
+    infer_idx = 0
+    first = True
+    captures: List[Dict[str, Any]] = []
+
+    while env.env.timestep < max_env_steps:
+        obs_payload = _obs_payload_from_raw_with_perturb(
+            raw_obs,
+            cam_keys,
+            image_noise_sigma=variant.get("image_noise_sigma"),
+            rng=rng,
+        )
+        frame_st_id = int(server.frame_st_id)
+        tracer.reset_chunk()
+        actions, _ = server._infer(obs_payload, frame_st_id=frame_st_id)
+        if infer_idx < top_k:
+            captures.append(
+                {
+                    "inference_idx_in_traj": infer_idx,
+                    "frame_st_id": frame_st_id,
+                    "activations": dict(tracer.captured),
+                }
             )
-            if variant.get("camera_rotate_deg") not in (None, 0):
-                raw_obs, _, _, _ = env.step([0.0] * 7)
 
-            raw_obs = _apply_eef_delta_preposition(
-                env,
-                raw_obs,
-                eef_delta=variant.get("eef_delta"),
-                max_steps=variant.get("eef_preposition_steps", 80),
-                step_size=variant.get("eef_step_size", 0.01),
-                tolerance=variant.get("eef_tolerance", 0.01),
-            )
+        key_frame_list: List[Dict[str, np.ndarray]] = []
+        action_per_frame = int(server.job_config.action_per_frame)
+        start_idx = 1 if first else 0
+        for i in range(start_idx, actions.shape[1]):
+            for j in range(actions.shape[2]):
+                ee_action = actions[:, i, j]
+                raw_obs, _, done, _ = env.step(ee_action)
+                if done:
+                    break
+                if (j + 1) % action_per_frame == 0:
+                    key_frame_list.append(_obs_payload_from_raw(raw_obs, cam_keys)["obs"][0])
+            if done:
+                break
+        first = False
+        infer_idx += 1
+        if done:
+            break
+        if key_frame_list:
+            server._compute_kv_cache({"obs": key_frame_list, "state": actions})
 
-            agent, eye = _extract_obs(raw_obs)
-            sigma = variant.get("image_noise_sigma", None)
-            if sigma is not None and float(sigma) > 0:
-                agent = _apply_noise(rng, agent, float(sigma))
-                eye = _apply_noise(rng, eye, float(sigma))
-            primary.append(agent)
-            wrist.append(eye)
-            proprios.append(np.asarray(raw_obs.get("robot0_eef_pos", np.zeros(3, dtype=np.float32)), dtype=np.float32))
-    finally:
-        env.close()
-    return {
-        "primary_images": np.stack(primary, axis=0),
-        "wrist_images": np.stack(wrist, axis=0),
-        "proprios": np.stack(proprios, axis=0),
-    }
+    return bool(done), infer_idx, captures
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect Lingbot-native perturbation variants and pair files for LQR.")
+    parser = argparse.ArgumentParser(description="Collect trajectory-topK activation records for LQR contrastive pairs.")
+    parser.add_argument("--config-name", type=str, default="libero")
     parser.add_argument("--libero-benchmark", type=str, default="libero_10")
     parser.add_argument("--task-id", type=int, default=0)
-    parser.add_argument("--num-samples", type=int, default=32)
-    parser.add_argument("--camera-height", type=int, default=128)
-    parser.add_argument("--camera-width", type=int, default=128)
-    parser.add_argument("--warmup-steps", type=int, default=5)
+    parser.add_argument("--num-episodes", type=int, default=10)
+    parser.add_argument("--top-k-inference-per-traj", type=int, default=10)
+    parser.add_argument("--selected-timesteps", type=str, default="0,10,20,30,40")
+    parser.add_argument("--layers", type=str, default="", help="Comma list, empty means all layers.")
+    parser.add_argument("--mode", choices=["video", "action", "both"], default="action")
+    parser.add_argument("--perturb-spec", type=Path, required=True)
+    parser.add_argument("--target-variants", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out-dir", type=Path, required=True)
-
-    parser.add_argument("--perturb-spec", type=Path, default=None, help="YAML/JSON with `variants` list.")
-    parser.add_argument("--mode", choices=["nominal", "perturbed", "both"], default="both")
-    parser.add_argument("--target-variants", type=str, default=None, help="Optional comma-separated names from perturb spec.")
-    parser.add_argument("--noise-sigma", type=float, default=None, help="Fallback when no perturb-spec is provided.")
-    parser.add_argument("--export-pairs", action="store_true", default=True)
-    parser.add_argument("--no-export-pairs", dest="export_pairs", action="store_false")
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    variants_dir = args.out_dir / "variants"
-    pairs_dir = args.out_dir / "pairs"
-    variants_dir.mkdir(parents=True, exist_ok=True)
-    if args.export_pairs:
-        pairs_dir.mkdir(parents=True, exist_ok=True)
+    records_dir = args.out_dir / "trajectory_records"
+    records_dir.mkdir(parents=True, exist_ok=True)
 
     bench_cls = benchmark.get_benchmark_dict()[args.libero_benchmark]
     bench = bench_cls()
     task = bench.get_task(args.task_id)
     task_lang = task.language
     init_states = bench.get_task_init_states(args.task_id)
-    sample_init_ids = [i % init_states.shape[0] for i in range(int(args.num_samples))]
-
     env_args = {
         "bddl_file_name": bench.get_task_bddl_file_path(args.task_id),
-        "camera_heights": args.camera_height,
-        "camera_widths": args.camera_width,
+        "camera_heights": 128,
+        "camera_widths": 128,
     }
 
-    variants = _load_variants(args.perturb_spec, args.noise_sigma)
-    selected_variants = _select_variants(variants, mode=args.mode, target_variants=args.target_variants)
+    server = _build_server(args.config_name)
+    transformer = server.transformer
+    n_layers = len(transformer.blocks)
+    layers = parse_int_list(args.layers) if args.layers.strip() else list(range(n_layers))
+    selected_timesteps = parse_int_list(args.selected_timesteps)
+    tracer = LingbotActivationTracer(layers=layers, selected_timesteps=selected_timesteps, mode=args.mode)
+    tracer.register_hooks(transformer)
 
-    variant_files = {}
-    variant_arrays = {}
-    for idx, variant in enumerate(selected_variants):
-        name = str(variant["name"])
-        data = _collect_variant_samples(
-            env_args=env_args,
-            init_states=init_states,
-            sample_init_ids=sample_init_ids,
-            warmup_steps=int(args.warmup_steps),
-            variant=variant,
-            seed=int(args.seed + idx * 1000),
-        )
-        out_npz = variants_dir / f"{name}.npz"
-        np.savez(out_npz, **data)
-        variant_arrays[name] = data
-        variant_files[name] = str(out_npz.resolve())
-        print(f"[collect] variant={name} -> {out_npz}")
+    original_forward = transformer.forward
 
-    pair_files = {}
-    if args.export_pairs and "nominal" in variant_arrays:
-        nominal = variant_arrays["nominal"]
-        for name, data in variant_arrays.items():
-            if name == "nominal":
-                continue
-            pdir = pairs_dir / name
-            pdir.mkdir(parents=True, exist_ok=True)
-            pos_fp = pdir / "positive.npz"
-            neg_fp = pdir / "negative.npz"
-            np.savez(pos_fp, **nominal)
-            np.savez(neg_fp, **data)
-            pair_manifest = {
-                "pair_name": name,
-                "positive_variant": "nominal",
-                "negative_variant": name,
-                "prompt": task_lang,
-                "task_language": task_lang,
-                "num_samples": int(args.num_samples),
-                "files": {
-                    "positive": str(pos_fp.resolve()),
-                    "negative": str(neg_fp.resolve()),
-                },
-            }
-            (pdir / "manifest.json").write_text(json.dumps(pair_manifest, indent=2), encoding="utf-8")
-            pair_files[name] = {
-                "positive": str(pos_fp.resolve()),
-                "negative": str(neg_fp.resolve()),
-                "manifest": str((pdir / "manifest.json").resolve()),
-            }
-            print(f"[pairs] nominal vs {name} -> {pdir}")
+    def patched_forward(*f_args, **f_kwargs):
+        tracer.begin_call(action_mode=bool(f_kwargs.get("action_mode", False)))
+        try:
+            return original_forward(*f_args, **f_kwargs)
+        finally:
+            tracer.end_call()
 
-    manifest = {
+    transformer.forward = patched_forward
+
+    variants = _variant_list(args.perturb_spec)
+    if args.target_variants:
+        keep = {x.strip() for x in args.target_variants.split(",") if x.strip()}
+        variants = [v for v in variants if str(v["name"]) in keep]
+    if not variants:
+        raise ValueError("No variants selected for collection.")
+
+    cam_keys = list(server.job_config.obs_cam_keys)
+    rows: List[Dict[str, Any]] = []
+    try:
+        for variant_idx, variant in enumerate(variants):
+            variant_name = str(variant["name"])
+            env = _construct_env(env_args)
+            try:
+                for episode_idx in range(int(args.num_episodes)):
+                    init_state = init_states[episode_idx % init_states.shape[0]]
+                    rng_seed = int(args.seed) + variant_idx * 100000 + episode_idx
+                    rng = np.random.default_rng(seed=rng_seed)
+                    success, infer_calls, captures = _run_one_trajectory(
+                        server=server,
+                        tracer=tracer,
+                        env=env,
+                        init_state=init_state,
+                        prompt=task_lang,
+                        cam_keys=cam_keys,
+                        top_k=int(args.top_k_inference_per_traj),
+                        variant=variant,
+                        rng=rng,
+                    )
+                    rec_name = f"{variant_name}__ep{episode_idx:04d}.pt"
+                    rec_path = records_dir / rec_name
+                    torch.save(
+                        {
+                            "variant_name": variant_name,
+                            "is_nominal": bool(variant_name == "nominal"),
+                            "task_id": int(args.task_id),
+                            "episode_idx": int(episode_idx),
+                            "trajectory_success": bool(success),
+                            "num_infer_calls": int(infer_calls),
+                            "captures": captures,
+                            "selected_timesteps": selected_timesteps,
+                            "layers": layers,
+                            "mode": args.mode,
+                            "prompt": task_lang,
+                        },
+                        rec_path,
+                    )
+                    rows.append(
+                        {
+                            "variant_name": variant_name,
+                            "is_nominal": bool(variant_name == "nominal"),
+                            "task_id": int(args.task_id),
+                            "episode_idx": int(episode_idx),
+                            "trajectory_success": bool(success),
+                            "num_infer_calls": int(infer_calls),
+                            "num_captured": int(len(captures)),
+                            "path": str(rec_path.resolve()),
+                        }
+                    )
+                    print(
+                        f"[collect] variant={variant_name} ep={episode_idx} success={success} "
+                        f"infer_calls={infer_calls} captured={len(captures)}"
+                    )
+            finally:
+                env.close()
+    finally:
+        tracer.close()
+        transformer.forward = original_forward
+
+    summary = {
+        "config_name": args.config_name,
         "libero_benchmark": args.libero_benchmark,
         "task_id": int(args.task_id),
         "task_language": task_lang,
-        "num_samples": int(args.num_samples),
-        "camera_height": int(args.camera_height),
-        "camera_width": int(args.camera_width),
-        "warmup_steps": int(args.warmup_steps),
-        "seed": int(args.seed),
+        "num_episodes": int(args.num_episodes),
+        "top_k_inference_per_traj": int(args.top_k_inference_per_traj),
+        "selected_timesteps": selected_timesteps,
+        "layers": layers,
         "mode": args.mode,
-        "target_variants": args.target_variants,
-        "variants": selected_variants,
-        "variant_files": variant_files,
-        "pair_files": pair_files,
+        "variants": variants,
+        "records": rows,
     }
-    manifest_fp = args.out_dir / "manifest.json"
-    manifest_fp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(f"[collect] wrote {manifest_fp}")
+    (args.out_dir / "manifest.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"[collect] wrote {args.out_dir / 'manifest.json'}")
 
 
 if __name__ == "__main__":

@@ -1,1 +1,1 @@
-"""Standalone LQR migration package for Lingbot-VA."""
+"""Standalone LQR package for Lingbot-VA."""
