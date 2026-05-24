@@ -321,6 +321,21 @@ def _apply_agentview_noise(
     return np.clip(agent_img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
 
 
+def _apply_agentview_noise_to_obs(
+    obs_dict: Dict[str, np.ndarray],
+    cam_keys: List[str],
+    sigma: Optional[float],
+    rng: Optional[np.random.Generator],
+) -> Dict[str, np.ndarray]:
+    if sigma is None or float(sigma) <= 0:
+        return obs_dict
+    if rng is None:
+        rng = np.random.default_rng(seed=0)
+    out = {cam_keys[0]: obs_dict[cam_keys[0]].copy(), cam_keys[1]: obs_dict[cam_keys[1]].copy()}
+    out[cam_keys[0]] = _apply_agentview_noise(out[cam_keys[0]], sigma=sigma, rng=rng)
+    return out
+
+
 def _obs_payload_from_raw_with_perturb(
     raw_obs: Dict[str, Any],
     cam_keys: List[str],
@@ -396,11 +411,12 @@ def _run_one_trajectory(
         raw_obs,
         eef_delta=variant.get("eef_delta"),
         max_steps=int(variant.get("eef_preposition_steps", 80)),
-        step_size=float(variant.get("eef_step_size", 0.01)),
+        step_size=float(variant.get("eef_step_size", 1.0)),
         tolerance=float(variant.get("eef_tolerance", 0.01)),
     )
 
     server._reset(prompt=prompt)
+    first_obs = _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
     done = False
     infer_idx = 0
     first = True
@@ -408,15 +424,15 @@ def _run_one_trajectory(
     video_frames: List[np.ndarray] = []
 
     while env.env.timestep < max_env_steps:
-        obs_payload = _obs_payload_from_raw_with_perturb(
-            raw_obs,
+        infer_obs = _apply_agentview_noise_to_obs(
+            first_obs,
             cam_keys,
-            image_noise_sigma=variant.get("image_noise_sigma"),
+            sigma=variant.get("image_noise_sigma"),
             rng=rng,
         )
+        obs_payload = {"obs": [infer_obs]}
         if save_video:
-            obs_view = obs_payload["obs"][0]
-            video_frames.append(_compose_video_frame(obs_view[cam_keys[0]], obs_view[cam_keys[1]]))
+            video_frames.append(_compose_video_frame(infer_obs[cam_keys[0]], infer_obs[cam_keys[1]]))
         frame_st_id = int(server.frame_st_id)
         tracer.reset_chunk()
         actions, _ = server._infer(obs_payload, frame_st_id=frame_st_id)
@@ -430,7 +446,8 @@ def _run_one_trajectory(
             )
 
         key_frame_list: List[Dict[str, np.ndarray]] = []
-        action_per_frame = int(server.job_config.action_per_frame)
+        assert actions.shape[2] % 4 == 0, f"Unexpected action horizon: {actions.shape}"
+        action_per_frame = int(actions.shape[2] // 4)
         start_idx = 1 if first else 0
         for i in range(start_idx, actions.shape[1]):
             for j in range(actions.shape[2]):
@@ -440,7 +457,14 @@ def _run_one_trajectory(
                     break
                 if (j + 1) % action_per_frame == 0:
                     key_frame_obs = _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
-                    key_frame_list.append(key_frame_obs)
+                    key_frame_list.append(
+                        _apply_agentview_noise_to_obs(
+                            key_frame_obs,
+                            cam_keys=cam_keys,
+                            sigma=variant.get("image_noise_sigma"),
+                            rng=rng,
+                        )
+                    )
                     if save_video:
                         video_frames.append(_compose_video_frame(key_frame_obs[cam_keys[0]], key_frame_obs[cam_keys[1]]))
             if done:
@@ -520,13 +544,13 @@ def main() -> None:
     rows: List[Dict[str, Any]] = []
     save_video = not bool(args.disable_video)
     try:
-        for variant_idx, variant in enumerate(variants):
+        for variant in variants:
             variant_name = str(variant["name"])
             env = _construct_env(env_args)
             try:
                 for episode_idx in range(int(args.num_episodes)):
                     init_state = init_states[episode_idx % init_states.shape[0]]
-                    rng_seed = int(args.seed) + variant_idx * 100000 + episode_idx
+                    rng_seed = int(args.seed) + episode_idx
                     rng = np.random.default_rng(seed=rng_seed)
                     success, infer_calls, captures, video_frames = _run_one_trajectory(
                         server=server,
