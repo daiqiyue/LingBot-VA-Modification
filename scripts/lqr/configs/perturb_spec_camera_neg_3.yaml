@@ -1,0 +1,16 @@
+variants:
+  - name: nominal
+
+  - name: camera_z_neg_15
+    camera_rotate_deg: -15.0
+    camera_axis: z
+
+  - name: camera_z_neg_30
+    camera_rotate_deg: -30.0
+    camera_axis: z
+
+
+  - name: camera_z_neg_45
+    camera_rotate_deg: -45.0
+    camera_axis: z
+

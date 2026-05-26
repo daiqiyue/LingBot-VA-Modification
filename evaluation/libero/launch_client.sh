@@ -8,9 +8,9 @@ PYTHONPATH=. python evaluation/libero/client.py \
     --port 29056 \
     --test-num 10 \
     --task-range $START $END \
-    --out-dir outputs/libero/task0_y_0.3 \
-    --prompt "put both the alphabet soup and the tomato sauce in the basket." \
-    --agentview-camera-rotate-deg 45 \
+    --out-dir outputs/libero/task0_camera_init_pos_0.2 \
+    --eef-delta 0.00 0.20 0.00 \
+    #--eef-delta 0.00 0.30 0.00 \
 
 
 

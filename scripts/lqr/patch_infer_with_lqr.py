@@ -17,6 +17,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--q-scale", type=float, default=10000.0)
     parser.add_argument("--r-scale", type=float, default=75000.0)
     parser.add_argument("--qf-scale", type=float, default=1.0)
+    parser.add_argument("--inject-mode", type=str, choices=["auto", "action", "video", "both"], default="auto")
     return parser.parse_args()
 
 
@@ -29,6 +30,7 @@ def _build_injector(args: argparse.Namespace) -> LQRInjector:
         q_scale=args.q_scale,
         r_scale=args.r_scale,
         qf_scale=args.qf_scale,
+        inject_mode=args.inject_mode,
         device=device,
     )
 

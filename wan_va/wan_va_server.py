@@ -91,6 +91,12 @@ class VA_Server:
                                             device=self.device,
                                             eval_mode=True,
                                             )
+        self.vram_debug = os.getenv("LINGBOT_VRAM_DEBUG", "0") == "1"
+        self.vram_debug_sync = os.getenv("LINGBOT_VRAM_DEBUG_SYNC", "1") == "1"
+        self._vram_log_every = max(1, int(os.getenv("LINGBOT_VRAM_LOG_EVERY", "1")))
+        self._infer_calls = 0
+        self._kv_calls = 0
+        self._log_component_param_vram()
 
         self.env_type = job_config.env_type
         self.streaming_vae_half = None
@@ -102,6 +108,44 @@ class VA_Server:
                 torch_device='cpu' if self.enable_offload else self.device,
             )
             self.streaming_vae_half = WanVAEStreamingWrapper(vae_half)
+
+    def _bytes_to_gib(self, nbytes: int) -> float:
+        return float(nbytes) / (1024.0 ** 3)
+
+    def _module_param_bytes(self, module: torch.nn.Module) -> int:
+        total = 0
+        for p in module.parameters():
+            total += p.numel() * p.element_size()
+        return int(total)
+
+    def _log_component_param_vram(self) -> None:
+        if not self.vram_debug:
+            return
+        vae_gib = self._bytes_to_gib(self._module_param_bytes(self.vae))
+        text_gib = self._bytes_to_gib(self._module_param_bytes(self.text_encoder))
+        tr_gib = self._bytes_to_gib(self._module_param_bytes(self.transformer))
+        logger.info(
+            f"[vram][params] vae={vae_gib:.2f}GiB text_encoder={text_gib:.2f}GiB "
+            f"transformer={tr_gib:.2f}GiB total={vae_gib + text_gib + tr_gib:.2f}GiB "
+            f"(parameter bytes only)"
+        )
+
+    def _log_cuda_mem(self, tag: str) -> None:
+        if not self.vram_debug:
+            return
+        if not torch.cuda.is_available():
+            logger.info(f"[vram] {tag} cuda=unavailable")
+            return
+        if self.vram_debug_sync:
+            torch.cuda.synchronize(self.device)
+        alloc = self._bytes_to_gib(torch.cuda.memory_allocated(self.device))
+        reserved = self._bytes_to_gib(torch.cuda.memory_reserved(self.device))
+        max_alloc = self._bytes_to_gib(torch.cuda.max_memory_allocated(self.device))
+        max_reserved = self._bytes_to_gib(torch.cuda.max_memory_reserved(self.device))
+        logger.info(
+            f"[vram] {tag} alloc={alloc:.2f}GiB reserved={reserved:.2f}GiB "
+            f"max_alloc={max_alloc:.2f}GiB max_reserved={max_reserved:.2f}GiB"
+        )
 
     def _get_t5_prompt_embeds(
         self,
@@ -376,6 +420,7 @@ class VA_Server:
 
     def _reset(self, prompt=None):
         logger.info('Reset.')
+        self._log_cuda_mem("reset:begin")
         self.use_cfg = (self.job_config.guidance_scale > 1) or (self.job_config.action_guidance_scale > 1)
         #### Reset all parameters
         self.frame_st_id = 0
@@ -439,8 +484,15 @@ class VA_Server:
         self.exp_save_root = os.path.join(self.save_root, 'real', self.exp_name)
         os.makedirs(self.exp_save_root, exist_ok=True)
         torch.cuda.empty_cache()
+        if self.vram_debug:
+            torch.cuda.reset_peak_memory_stats(self.device)
+        self._log_cuda_mem("reset:end")
 
     def _infer(self, obs, frame_st_id=0):
+        self._infer_calls += 1
+        should_log = self.vram_debug and (self._infer_calls % self._vram_log_every == 0)
+        if should_log:
+            self._log_cuda_mem(f"infer[{self._infer_calls}]:begin frame_st_id={frame_st_id}")
         frame_chunk_size = self.job_config.frame_chunk_size
         if frame_st_id == 0:
             init_latent = self._encode_obs(obs)
@@ -520,6 +572,8 @@ class VA_Server:
                                                   return_dict=False)
 
                 latents[:, :, 0:1] = latent_cond if frame_st_id == 0 else latents[:, :, 0:1]
+            if should_log:
+                self._log_cuda_mem(f"infer[{self._infer_calls}]:after_video_loop")
 
             for i, t in enumerate(tqdm(action_timesteps)):
                 last_step = i == len(action_timesteps) - 1
@@ -559,6 +613,8 @@ class VA_Server:
                                                          return_dict=False)
 
                 actions[:, :, 0:1] = action_cond if frame_st_id == 0 else actions[:, :, 0:1]
+            if should_log:
+                self._log_cuda_mem(f"infer[{self._infer_calls}]:after_action_loop")
 
         actions[:, ~self.action_mask] *= 0
 
@@ -567,13 +623,21 @@ class VA_Server:
 
         actions = self.postprocess_action(actions)
         torch.cuda.empty_cache()
+        if should_log:
+            self._log_cuda_mem(f"infer[{self._infer_calls}]:end")
         return actions, latents
 
     def _compute_kv_cache(self, obs):
         ### optional async save obs for debug
+        self._kv_calls += 1
+        should_log = self.vram_debug and (self._kv_calls % self._vram_log_every == 0)
+        if should_log:
+            self._log_cuda_mem(f"kv[{self._kv_calls}]:begin frame_st_id={self.frame_st_id}")
         self.transformer.clear_pred_cache(self.cache_name)
         save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
         latent_model_input = self._encode_obs(obs)
+        if should_log:
+            self._log_cuda_mem(f"kv[{self._kv_calls}]:after_encode_obs")
         if self.frame_st_id == 0:
             latent_model_input = torch.cat(
                 [self.init_latent, latent_model_input],
@@ -581,6 +645,8 @@ class VA_Server:
 
         action_model_input = self.preprocess_action(obs['state'])
         action_model_input = action_model_input.to(latent_model_input)
+        if should_log:
+            self._log_cuda_mem(f"kv[{self._kv_calls}]:after_prepare_action")
         logger.info(
             f"get KV cache obs: {latent_model_input.shape} {action_model_input.shape}"
         )
@@ -595,13 +661,19 @@ class VA_Server:
                              update_cache=2,
                              cache_name=self.cache_name,
                              action_mode=False)
+            if should_log:
+                self._log_cuda_mem(f"kv[{self._kv_calls}]:after_latent_update")
 
             self.transformer(self._repeat_input_for_cfg(input_dict['action_res_lst']),
                              update_cache=2,
                              cache_name=self.cache_name,
                              action_mode=True)
+            if should_log:
+                self._log_cuda_mem(f"kv[{self._kv_calls}]:after_action_update")
         torch.cuda.empty_cache()
         self.frame_st_id += latent_model_input.shape[2]
+        if should_log:
+            self._log_cuda_mem(f"kv[{self._kv_calls}]:end frame_st_id={self.frame_st_id}")
 
     @torch.no_grad()
     def infer(self, obs):

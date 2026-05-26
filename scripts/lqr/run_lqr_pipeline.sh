@@ -9,6 +9,7 @@
 # Common overrides:
 #   NUM_EPISODES=5 TASK_RANGE_START=0 TASK_RANGE_END=2 bash scripts/lqr/run_lqr_pipeline.sh
 #   PERTURB_SPEC=scripts/lqr/configs/perturb_spec_init_pos.yaml bash scripts/lqr/run_lqr_pipeline.sh
+#   EXISTING_PAIRS_ALL_DIR=outputs/lqr/pairs_all_init_pos_4_20260525_015124 bash scripts/lqr/run_lqr_pipeline.sh
 #   SKIP_EVAL=1 bash scripts/lqr/run_lqr_pipeline.sh
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
@@ -35,6 +36,8 @@ SELECTED_TIMESTEPS="${SELECTED_TIMESTEPS:-0,10,20,30,40}"
 COLLECT_MODE="${COLLECT_MODE:-action}"
 PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_init_pos.yaml}"
 TARGET_VARIANTS="${TARGET_VARIANTS:-}"
+EXISTING_COLLECT_DIR="${EXISTING_COLLECT_DIR:-}"
+EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-}"
 PAIR_SEED="${PAIR_SEED:-0}"
 K_TARGET="${K_TARGET:-32}"
 P_OVER="${P_OVER:-8}"
@@ -43,57 +46,104 @@ RIDGE="${RIDGE:-1e-3}"
 JAC_SUBDIR="${JAC_SUBDIR:-A_tilde_lingbot}"
 
 OUT_BASE="${OUT_BASE:-outputs/lqr}"
-PAIRS_DIR="${PAIRS_DIR:-${OUT_BASE}/pairs_${TS}}"
-PAIRS_ALL_DIR="${PAIRS_ALL_DIR:-${OUT_BASE}/pairs_all_${TS}}"
-SVD_DIR="${SVD_DIR:-${OUT_BASE}/svd_all_perturb_${TS}}"
+PERTURB_SPEC_BASENAME="$(basename -- "${PERTURB_SPEC}")"
+PERTURB_TAG="${PERTURB_SPEC_BASENAME%.*}"
+PERTURB_TAG="${PERTURB_TAG#perturb_spec_}"
+if [[ -z "${PERTURB_TAG}" ]]; then
+  PERTURB_TAG="perturb"
+fi
+PAIRS_DIR="${PAIRS_DIR:-${OUT_BASE}/pairs_${PERTURB_TAG}_${TS}}"
+PAIRS_ALL_DIR="${PAIRS_ALL_DIR:-${OUT_BASE}/pairs_all_${PERTURB_TAG}_${TS}}"
+SVD_DIR="${SVD_DIR:-${OUT_BASE}/svd_all_perturb_${PERTURB_TAG}_${TS}}"
 
 # -------- Evaluation --------
 SKIP_EVAL="${SKIP_EVAL:-0}"
-EVAL_OUT_BASE="${EVAL_OUT_BASE:-outputs/lqr_eval_all_perturb_${TS}}"
+EVAL_OUT_BASE="${EVAL_OUT_BASE:-outputs/lqr_eval_all_perturb_${PERTURB_TAG}_${TS}}"
 TASK_RANGE_START="${TASK_RANGE_START:-0}"
 TASK_RANGE_END="${TASK_RANGE_END:-2}"
 EVAL_NUM_EPISODES="${EVAL_NUM_EPISODES:-10}"
 PORT="${PORT:-29056}"
+EVAL_STARTUP_WAIT_SEC="${EVAL_STARTUP_WAIT_SEC:-1200}"
+INJECT_MODE="${INJECT_MODE:-auto}"
 PROMPT="${PROMPT:-}"
 LQR_CONFIG="${LQR_CONFIG:-scripts/lqr/configs/lqr_config.yaml}"
 
 echo "===== Lingbot LQR Pipeline ====="
 echo "REPO_ROOT=${REPO_ROOT}"
 echo "PERTURB_SPEC=${PERTURB_SPEC}"
+echo "PERTURB_TAG=${PERTURB_TAG}"
+echo "EXISTING_COLLECT_DIR=${EXISTING_COLLECT_DIR:-<none>}"
+echo "EXISTING_PAIRS_ALL_DIR=${EXISTING_PAIRS_ALL_DIR:-<none>}"
 echo "PAIRS_DIR=${PAIRS_DIR}"
 echo "PAIRS_ALL_DIR=${PAIRS_ALL_DIR}"
 echo "SVD_DIR=${SVD_DIR}"
 echo "EVAL_OUT_BASE=${EVAL_OUT_BASE}"
+echo "INJECT_MODE=${INJECT_MODE}"
+echo "EVAL_STARTUP_WAIT_SEC=${EVAL_STARTUP_WAIT_SEC}"
 echo "TS=${TS}"
 echo "================================"
 
-COLLECT_CMD=(
-  python scripts/lqr/run_collect_inputs.py
-  --config-name "${CONFIG_NAME}"
-  --libero-benchmark "${LIBERO_BENCHMARK}"
-  --task-id "${TASK_ID}"
-  --num-episodes "${NUM_EPISODES}"
-  --top-k-inference-per-traj "${TOPK_INFER_PER_TRAJ}"
-  --selected-timesteps "${SELECTED_TIMESTEPS}"
-  --mode "${COLLECT_MODE}"
-  --perturb-spec "${PERTURB_SPEC}"
-  --out-dir "${PAIRS_DIR}"
-)
-if [[ -n "${TARGET_VARIANTS}" ]]; then
-  COLLECT_CMD+=(--target-variants "${TARGET_VARIANTS}")
-fi
-echo "[1/5] collect trajectory activations"
-"${COLLECT_CMD[@]}"
+PAIRS_DIR_FOR_SVD="${PAIRS_ALL_DIR}"
+COLLECT_DIR_FOR_PAIRING="${PAIRS_DIR}"
+if [[ -n "${EXISTING_PAIRS_ALL_DIR}" ]]; then
+  if [[ ! -f "${EXISTING_PAIRS_ALL_DIR}/manifest.json" ]]; then
+    echo "[error] EXISTING_PAIRS_ALL_DIR missing manifest.json: ${EXISTING_PAIRS_ALL_DIR}" >&2
+    exit 2
+  fi
+  if [[ ! -f "${EXISTING_PAIRS_ALL_DIR}/positive.pt" ]]; then
+    echo "[error] EXISTING_PAIRS_ALL_DIR missing positive.pt: ${EXISTING_PAIRS_ALL_DIR}" >&2
+    exit 2
+  fi
+  if [[ ! -f "${EXISTING_PAIRS_ALL_DIR}/negative.pt" ]]; then
+    echo "[error] EXISTING_PAIRS_ALL_DIR missing negative.pt: ${EXISTING_PAIRS_ALL_DIR}" >&2
+    exit 2
+  fi
+  PAIRS_DIR_FOR_SVD="${EXISTING_PAIRS_ALL_DIR}"
+  PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR}"
+  echo "[1/5] skip collect, reuse existing built pairs: ${PAIRS_DIR_FOR_SVD}"
+  echo "[2/5] skip pair build, reuse existing built pairs: ${PAIRS_DIR_FOR_SVD}"
+else
+  if [[ -n "${EXISTING_COLLECT_DIR}" ]]; then
+    if [[ ! -f "${EXISTING_COLLECT_DIR}/manifest.json" ]]; then
+      echo "[error] EXISTING_COLLECT_DIR missing manifest.json: ${EXISTING_COLLECT_DIR}" >&2
+      exit 2
+    fi
+    if [[ ! -d "${EXISTING_COLLECT_DIR}/trajectory_records" ]]; then
+      echo "[error] EXISTING_COLLECT_DIR missing trajectory_records/: ${EXISTING_COLLECT_DIR}" >&2
+      exit 2
+    fi
+    COLLECT_DIR_FOR_PAIRING="${EXISTING_COLLECT_DIR}"
+    echo "[1/5] skip collect, reuse existing collect dir: ${COLLECT_DIR_FOR_PAIRING}"
+  else
+    COLLECT_CMD=(
+      python scripts/lqr/run_collect_inputs.py
+      --config-name "${CONFIG_NAME}"
+      --libero-benchmark "${LIBERO_BENCHMARK}"
+      --task-id "${TASK_ID}"
+      --num-episodes "${NUM_EPISODES}"
+      --top-k-inference-per-traj "${TOPK_INFER_PER_TRAJ}"
+      --selected-timesteps "${SELECTED_TIMESTEPS}"
+      --mode "${COLLECT_MODE}"
+      --perturb-spec "${PERTURB_SPEC}"
+      --out-dir "${PAIRS_DIR}"
+    )
+    if [[ -n "${TARGET_VARIANTS}" ]]; then
+      COLLECT_CMD+=(--target-variants "${TARGET_VARIANTS}")
+    fi
+    echo "[1/5] collect trajectory activations"
+    "${COLLECT_CMD[@]}"
+  fi
 
-echo "[2/5] build pool-based pairs"
-python scripts/lqr/build_all_pairs.py \
-  --collect-dir "${PAIRS_DIR}" \
-  --out-dir "${PAIRS_ALL_DIR}" \
-  --pair-seed "${PAIR_SEED}"
+  echo "[2/5] build timestep-aligned pairs"
+  python scripts/lqr/build_all_pairs.py \
+    --collect-dir "${COLLECT_DIR_FOR_PAIRING}" \
+    --out-dir "${PAIRS_ALL_DIR}" \
+    --pair-seed "${PAIR_SEED}"
+fi
 
 echo "[3/5] run SVD"
 python scripts/lqr/run_partition_svd.py \
-  --pairs-dir "${PAIRS_ALL_DIR}" \
+  --pairs-dir "${PAIRS_DIR_FOR_SVD}" \
   --out-dir "${SVD_DIR}" \
   --config-name "${CONFIG_NAME}" \
   --mode "${COLLECT_MODE}" \
@@ -117,10 +167,12 @@ else
     --libero-benchmark "${LIBERO_BENCHMARK}"
     --task-range "${TASK_RANGE_START}" "${TASK_RANGE_END}"
     --num-episodes "${EVAL_NUM_EPISODES}"
+    --startup-wait-sec "${EVAL_STARTUP_WAIT_SEC}"
     --port "${PORT}"
     --svd-dir "${SVD_DIR}"
     --jac-dir-act "${JAC_SUBDIR}"
     --lqr-config "${LQR_CONFIG}"
+    --inject-mode "${INJECT_MODE}"
     --perturb-spec "${PERTURB_SPEC}"
     --out-dir "${EVAL_OUT_BASE}"
   )
@@ -133,8 +185,9 @@ fi
 
 echo ""
 echo "Done."
+echo "collect_dir : ${COLLECT_DIR_FOR_PAIRING}"
 echo "pairs_raw   : ${PAIRS_DIR}"
-echo "pairs_all   : ${PAIRS_ALL_DIR}"
+echo "pairs_all   : ${PAIRS_DIR_FOR_SVD}"
 echo "svd_dir     : ${SVD_DIR}"
 if [[ "${SKIP_EVAL}" != "1" ]]; then
   echo "eval_out    : ${EVAL_OUT_BASE}"

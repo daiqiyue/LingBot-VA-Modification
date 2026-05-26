@@ -16,6 +16,7 @@ class LQRInjector:
         q_scale: float,
         r_scale: float,
         qf_scale: float,
+        inject_mode: str = "auto",
         device: Optional[torch.device] = None,
     ) -> None:
         self.svd_dir = Path(svd_dir)
@@ -25,13 +26,23 @@ class LQRInjector:
         self.r_scale = float(r_scale)
         self.qf_scale = float(qf_scale)
         self.device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+        self.inject_mode = str(inject_mode)
         self._hook_handles: List[torch.utils.hooks.RemovableHandle] = []
         self.in_ad = False
-        self.pass_idx = -1
+        self.video_step_idx = 0
+        self.action_step_idx = 0
+        self.current_action_mode: bool = False
+        self.current_step_idx: int = -1
         self.u_step_pending: Optional[Dict[str, torch.Tensor]] = None
         self.u_norm_log: List[Tuple[int, int, float, float]] = []
+        self._shape_warned = set()
 
         cfg = json.loads((self.svd_dir / "config.json").read_text(encoding="utf-8"))
+        cfg_mode = str(cfg.get("mode", "action"))
+        if self.inject_mode == "auto":
+            self.inject_mode = cfg_mode
+        if self.inject_mode not in {"action", "video", "both"}:
+            raise ValueError(f"inject_mode must be one of action/video/both/auto, got {inject_mode}")
         self.sel_t = list(cfg["selected_timesteps"])
         self.sel_idx_of = {t: i for i, t in enumerate(self.sel_t)}
         self.T_diff = len(self.sel_t)
@@ -86,20 +97,37 @@ class LQRInjector:
 
     def on_chunk_start(self, chunk_id: int) -> None:
         del chunk_id
-        self.pass_idx = -1
+        self.video_step_idx = 0
+        self.action_step_idx = 0
+        self.current_step_idx = -1
         self.u_step_pending = None
 
     def begin_call(self, action_mode: bool, update_cache: int) -> None:
-        del action_mode, update_cache
-        self.pass_idx += 1
+        del update_cache
+        self.current_action_mode = bool(action_mode)
+        if self.current_action_mode:
+            self.current_step_idx = self.action_step_idx
+            self.action_step_idx += 1
+        else:
+            self.current_step_idx = self.video_step_idx
+            self.video_step_idx += 1
 
     def end_call(self) -> None:
         pass
 
+    def _mode_allow(self, action_mode: bool) -> bool:
+        if self.inject_mode == "both":
+            return True
+        if self.inject_mode == "action":
+            return bool(action_mode)
+        return not bool(action_mode)
+
     def _selected(self) -> Tuple[Optional[int], Optional[int]]:
-        if self.pass_idx < 0:
+        if self.current_step_idx < 0:
             return None, None
-        step = self.pass_idx
+        if not self._mode_allow(self.current_action_mode):
+            return None, None
+        step = self.current_step_idx
         sel = self.sel_idx_of.get(step)
         if sel is None:
             return None, None
@@ -125,6 +153,15 @@ class LQRInjector:
             z = output[0].detach().reshape(-1)
             z_dtype = output.dtype
             v_in = self.vcache.for_layer(l_in, step)
+            if z.numel() != v_in.shape[0]:
+                warn_key = (l_in, step, int(self.current_action_mode))
+                if warn_key not in self._shape_warned:
+                    self._shape_warned.add(warn_key)
+                    print(
+                        f"[lqr][skip] shape mismatch at layer={l_in} step={step} "
+                        f"action_mode={self.current_action_mode}: z={z.numel()} v_in={v_in.shape[0]}"
+                    )
+                return output
             self.in_ad = True
             try:
                 x_proj = (z.to(v_in.dtype) @ v_in).float()
@@ -142,7 +179,10 @@ class LQRInjector:
                 u_full = v_out @ u_tilde.to(v_out.dtype)
             finally:
                 self.in_ad = False
-            return output + u_full.to(z_dtype).reshape_as(output)
+            delta = u_full.to(z_dtype).reshape_as(output[0])
+            out = output.clone()
+            out[0] = out[0] + delta
+            return out
 
         return hook
 
@@ -155,6 +195,15 @@ class LQRInjector:
                 return output
             z = output[0].detach().reshape(-1)
             v_in = self.vcache.for_layer(self.L - 1, step)
+            if z.numel() != v_in.shape[0]:
+                warn_key = (self.L - 1, step, int(self.current_action_mode))
+                if warn_key not in self._shape_warned:
+                    self._shape_warned.add(warn_key)
+                    print(
+                        f"[lqr][skip] shape mismatch at layer={self.L - 1} step={step} "
+                        f"action_mode={self.current_action_mode}: z={z.numel()} v_in={v_in.shape[0]}"
+                    )
+                return output
             self.in_ad = True
             try:
                 x_proj = (z.to(v_in.dtype) @ v_in).float()
@@ -189,7 +238,10 @@ class LQRInjector:
             finally:
                 self.in_ad = False
             self.u_step_pending = None
-            return output + u_full.to(output.dtype).reshape_as(output)
+            delta = u_full.to(output.dtype).reshape_as(output[0])
+            out = output.clone()
+            out[0] = out[0] + delta
+            return out
 
         return hook
 

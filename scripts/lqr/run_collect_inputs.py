@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 from libero.libero import benchmark
 from libero.libero.envs import OffScreenRenderEnv
+from wan_va.utils import init_logger
 
 from scripts.lqr.common import maybe_load_yaml, parse_int_list
 
@@ -482,6 +483,8 @@ def _run_one_trajectory(
 
 
 def main() -> None:
+    # Ensure logger handlers are installed so server-side VRAM logs are visible.
+    init_logger()
     parser = argparse.ArgumentParser(description="Collect trajectory-topK activation records for LQR contrastive pairs.")
     parser.add_argument("--config-name", type=str, default="libero")
     parser.add_argument("--libero-benchmark", type=str, default="libero_10")
@@ -517,6 +520,19 @@ def main() -> None:
     }
 
     server = _build_server(args.config_name)
+    # `_configure_model` only freezes the transformer; the VAE and text encoder are
+    # loaded via HF `from_pretrained` with default `requires_grad=True`. When this
+    # script bypasses `VA_Server.infer` (which is decorated with `@torch.no_grad()`)
+    # and calls `_infer` / `_compute_kv_cache` directly, the VAE forward inside
+    # `_encode_obs` (which sits outside the inner `with torch.no_grad():` blocks)
+    # builds an autograd graph. The streaming VAE's `feat_cache` and the persisted
+    # `self.init_latent` then keep that graph alive across chunks, leaking VAE
+    # activations until OOM. Force everything to eval/no-grad to mirror the
+    # behaviour of the production server path.
+    server.vae.eval().requires_grad_(False)
+    server.text_encoder.eval().requires_grad_(False)
+    if getattr(server, "streaming_vae_half", None) is not None:
+        server.streaming_vae_half.vae.eval().requires_grad_(False)
     transformer = server.transformer
     n_layers = len(transformer.blocks)
     layers = parse_int_list(args.layers) if args.layers.strip() else list(range(n_layers))

@@ -1,124 +1,176 @@
-# Activation Steering on LIBERO (One-Pass Primary Workflow)
+# Lingbot LQR Workflow (Simple and Practical)
 
-This directory now supports a **one-pass workflow**:
+This README records the current LQR pipeline in plain language:
 
-- You provide `perturb_spec`.
-- The script automatically runs nominal + all perturb variants under tracing.
-- It directly builds `steering_bank.pt`.
+1. How to run the full workflow.
+2. How to reuse already collected activations (skip collect).
+3. How to avoid common failures.
 
-No manual `collect -> pairs -> trace-index` pipeline is required for the main use case.
+The LQR scripts are under `scripts/lqr/`.  
+This file is placed in `scripts/activation_steering/` as a convenient project note.
 
-## 0) Prerequisites
+## 0) Quick mental model
 
-- Run from repository root (contains `scripts/`, `evaluation/`, `wan_va/`).
-- LIBERO environment and checkpoints are ready.
-- `pyyaml` installed if you use YAML config files.
-- Use a single free port (examples use `29056`).
+Current LQR flow has 5 stages:
 
-## 1) Prepare perturb spec
+1. Collect trajectory activations.
+2. Build positive/negative pairs.
+3. Run SVD on activation pairs.
+4. Compute projected Jacobians.
+5. Run LQR-steered eval.
 
-Example config:
+## 1) Recommended entrypoints
 
-- `scripts/activation_steering/configs/perturb_spec_init_pos.yaml`
-
-Expected structure:
-- one `nominal` variant
-- one or more non-nominal perturb variants
-
-The one-pass script will:
-- run nominal trace once
-- run each non-nominal variant trace once
-- aggregate all perturbed traces against nominal traces
-
-## 2) One-pass build steering bank (recommended)
+Run from repo root:
 
 ```bash
-python scripts/activation_steering/run_libero_build_steering_bank_onepass.py \
-  --config-name libero \
-  --libero-benchmark libero_10 \
-  --task-range 0 1 \
-  --num-episodes 1 \
-  --port 29056 \
-  --trace-out-dir outputs/actadd_onepass_debug/trace_bank \
-  --token-policy scripts/activation_steering/configs/token_policy.yaml \
-  --layers 15,19,22,25,27 \
-  --modality both \
-  --startup-wait-sec 240 \
-  --perturb-spec scripts/activation_steering/configs/perturb_spec_init_pos.yaml \
-  --phase-filter infer \
-  --update-cache-filter 0 \
-  --agg trimmed_mean \
-  --normalize l2 \
-  --out-path outputs/actadd_onepass_debug/steering_bank.pt
+cd /storage/home/hcoda1/9/qdai41/scratch/cosmos/lingbot-va
 ```
 
-Main outputs:
-- `.../steering_bank.pt`
-- `.../steering_bank.pt.meta.json`
-- `.../trace_bank/nominal_trace/...`
-- `.../trace_bank/perturbed_trace_*...`
-
-## 3) Run steered evaluation
+### Main (init_pos)
 
 ```bash
-python scripts/activation_steering/run_libero_steered_eval.py \
-  --config-name libero \
-  --libero-benchmark libero_10 \
-  --task-range 0 1 \
-  --num-episodes 10 \
-  --port 29056 \
-  --steering-bank outputs/actadd_onepass_debug/steering_bank.pt \
-  --steering-config scripts/activation_steering/configs/steering_config.yaml \
-  --perturb-spec scripts/activation_steering/configs/perturb_spec_init_pos.yaml \
-  --out-dir outputs/actadd_onepass_debug/steered_eval
+sbatch run_lqr.sbatch
 ```
 
-Outputs:
-- `metrics_nominal.json`
-- `metrics_perturbed.json`
-- `summary.json`
-
-## 4) Slurm batch entrypoint
-
-`run_actadd.sbatch` already uses this one-pass flow:
-
-1. one-pass bank build
-2. steered eval
+### Camera perturbation
 
 ```bash
-sbatch run_actadd.sbatch
+sbatch run_lqr_camera.sbatch
 ```
 
-Optional overrides:
+### Gaussian perturbation
 
 ```bash
-TRACE_NUM_EPISODES=3 TASK_START=0 TASK_END=1 EVAL_NUM_EPISODES=10 sbatch run_actadd.sbatch
+sbatch run_lqr_gaussian.sbatch
 ```
 
-## 5) Legacy scripts (still available)
+## 2) Reuse already collected activations (skip collect)
 
-The old multi-step scripts remain in this folder for compatibility and experiments:
+If you already have a collect output directory with:
 
-- `run_libero_collect.py`
-- `build_pairs.py`
-- `index_traces.py`
-- `build_steering_bank.py`
+- `manifest.json`
+- `trajectory_records/`
 
-Use them only if you explicitly need pair-index based workflows.
+then you can skip stage 1 and continue from pairing:
 
-## Troubleshooting
+```bash
+sbatch --export=EXISTING_COLLECT_DIR=/abs/path/to/outputs/lqr/pairs_xxx run_lqr.sbatch
+```
 
-- **No logs from server wrappers**
-  - `hook_trace_activations.py` and `patch_infer_with_steering.py` now initialize LingBot logger in wrapper mode.
+For camera / gaussian entrypoints:
 
-- **Port never listens**
-  - Ensure no stale process occupies the same port and increase `--startup-wait-sec` for slow model initialization.
+```bash
+sbatch --export=EXISTING_COLLECT_DIR=/abs/path/to/outputs/lqr/pairs_camera_xxx run_lqr_camera.sbatch
+sbatch --export=EXISTING_COLLECT_DIR=/abs/path/to/outputs/lqr/pairs_gaussian_xxx run_lqr_gaussian.sbatch
+```
 
-- **No vectors in bank**
-  - Check `phase-filter` / `update-cache-filter`.
-  - Ensure traces exist under both nominal and perturbed run-tags.
+Behavior:
 
-## Notes
+- `EXISTING_COLLECT_DIR` empty: run collect as usual.
+- `EXISTING_COLLECT_DIR` set: skip collect, directly use this directory for `build_all_pairs.py`.
 
-- `hook_trace_activations.py` and `patch_infer_with_steering.py` are runtime monkey patches only.
-- No source modifications to `wan_va/` or `evaluation/` are required to run the workflow.
+## 3) Output directory naming (with perturbation suffix)
+
+Pipeline now auto-extracts a perturbation tag from `PERTURB_SPEC` file name:
+
+- `perturb_spec_init_pos.yaml` -> `init_pos`
+- `perturb_spec_camera.yaml` -> `camera`
+- `perturb_spec_gaussian.yaml` -> `gaussian`
+
+Default outputs become:
+
+- `outputs/lqr/pairs_<tag>_<timestamp>`
+- `outputs/lqr/pairs_all_<tag>_<timestamp>`
+- `outputs/lqr/svd_all_perturb_<tag>_<timestamp>`
+- `outputs/lqr_eval_all_perturb_<tag>_<timestamp>`
+
+## 4) Important runtime knobs
+
+All of these can be overridden via `sbatch --export=...`.
+
+- `COLLECT_MODE` (default: `action`)
+- `INJECT_MODE` (default: `auto`)
+- `EVAL_STARTUP_WAIT_SEC` (default: `1200`)
+- `TARGET_VARIANTS`
+- `NUM_EPISODES`, `EVAL_NUM_EPISODES`
+- `TOPK_INFER_PER_TRAJ`
+- `PAIR_SEED`
+- `K_TARGET`, `NUM_SAMPLES`, `RIDGE`
+- `SKIP_EVAL`
+
+### Recommended for action-based artifacts
+
+If your SVD/Jacobian artifacts were built from `COLLECT_MODE=action`, run eval with:
+
+```bash
+sbatch --export=INJECT_MODE=action run_lqr.sbatch
+```
+
+This avoids cross-branch shape mismatch during LQR injection.
+
+## 5) Run only eval (when SVD/Jac are already ready)
+
+```bash
+sbatch run_lqr_eval.sbatch
+```
+
+`run_lqr_eval.sbatch` already sets distributed env defaults and a longer startup wait.
+
+## 6) Troubleshooting
+
+### A) `MASTER_ADDR expected, but not set`
+
+Cause: torch distributed `env://` variables missing for eval server startup.
+
+Fix: use updated sbatch scripts, or manually export:
+
+- `MASTER_ADDR`
+- `MASTER_PORT`
+- `RANK`
+- `WORLD_SIZE`
+- `LOCAL_RANK`
+
+### B) `LQR server did not start at port ...`
+
+Cause: startup timeout too short on slower machines.
+
+Fix: increase:
+
+```bash
+sbatch --export=EVAL_STARTUP_WAIT_SEC=1200 run_lqr.sbatch
+```
+
+### C) `mat1 and mat2 shapes cannot be multiplied`
+
+Cause: injection branch does not match offline artifact branch (action vs video).
+
+Fix: explicitly set `INJECT_MODE` to match artifact modality, most commonly:
+
+```bash
+INJECT_MODE=action
+```
+
+### D) Collect video looks jittery
+
+Current collect video export is aligned to client behavior (imageio-based writer and environment-frame-centric sequence). If you still see jitter, check whether you are replaying an old output directory from a previous run.
+
+## 7) Minimal practical examples
+
+### Full fresh run
+
+```bash
+sbatch run_lqr.sbatch
+```
+
+### Reuse collected activations and force action injection
+
+```bash
+sbatch --export=EXISTING_COLLECT_DIR=/storage/home/.../outputs/lqr/pairs_init_pos_20260524_123456,INJECT_MODE=action run_lqr.sbatch
+```
+
+### Skip eval (build artifacts only)
+
+```bash
+sbatch --export=SKIP_EVAL=1 run_lqr.sbatch
+```

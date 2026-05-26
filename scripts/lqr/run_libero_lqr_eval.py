@@ -52,6 +52,8 @@ def _build_server_cmd(args: argparse.Namespace) -> List[str]:
         str(args.r_scale),
         "--qf-scale",
         str(args.qf_scale),
+        "--inject-mode",
+        str(args.inject_mode),
     ]
     return cmd
 
@@ -136,6 +138,7 @@ def main() -> None:
     parser.add_argument("--q-scale", type=float, default=10000.0)
     parser.add_argument("--r-scale", type=float, default=75000.0)
     parser.add_argument("--qf-scale", type=float, default=1.0)
+    parser.add_argument("--inject-mode", type=str, choices=["auto", "action", "video", "both"], default="auto")
     parser.add_argument("--perturb-spec", type=str, default=None)
     parser.add_argument("--out-dir", type=str, required=True)
     args = parser.parse_args()
@@ -145,11 +148,26 @@ def main() -> None:
     args.q_scale = float(cfg.get("q_scale", args.q_scale))
     args.r_scale = float(cfg.get("r_scale", args.r_scale))
     args.qf_scale = float(cfg.get("qf_scale", args.qf_scale))
+    cfg_inject_mode = cfg.get("inject_mode")
+    if cfg_inject_mode is not None:
+        args.inject_mode = str(cfg_inject_mode)
+    elif args.inject_mode == "auto":
+        cfg_modality = str(cfg.get("modality", "")).strip().lower()
+        if cfg_modality in {"action", "video", "both"}:
+            args.inject_mode = cfg_modality
     if cfg.get("jac_dir_act"):
         args.jac_dir_act = str(cfg["jac_dir_act"])
 
+    if not args.perturb_spec:
+        raise ValueError("--perturb-spec is required (nominal eval is skipped; only perturbed variants are run).")
+
+    variants = _load_eval_variants(args.perturb_spec)
+    if not variants:
+        raise ValueError(
+            f"No non-nominal variants found in perturb spec: {args.perturb_spec}"
+        )
+
     out_root = ensure_dir(args.out_dir)
-    nominal_out = ensure_dir(os.path.join(out_root, "nominal"))
     perturbed_root = ensure_dir(os.path.join(out_root, "perturbed"))
 
     server_cmd = _build_server_cmd(args)
@@ -161,11 +179,6 @@ def main() -> None:
         if not _wait_for_port("127.0.0.1", args.port, args.startup_wait_sec):
             raise RuntimeError(f"LQR server did not start at port {args.port}")
 
-        nominal_cmd = _build_client_cmd(args, out_dir=nominal_out, variant=None)
-        print(f"[eval] nominal client: {' '.join(nominal_cmd)}")
-        subprocess.run(nominal_cmd, check=True, env=env)
-
-        variants = _load_eval_variants(args.perturb_spec)
         variant_metrics = {}
         for variant in variants:
             name = str(variant.get("name", "variant"))
@@ -177,23 +190,20 @@ def main() -> None:
     finally:
         _stop_process(server_proc)
 
-    nominal_metrics = _collect_task_metrics(nominal_out, args.libero_benchmark, args.task_range)
-    avg_variant = 0.0
-    if args.perturb_spec:
-        vals = [v["avg_succ_rate"] for v in variant_metrics.values()]
-        avg_variant = float(sum(vals) / len(vals)) if vals else 0.0
+    vals = [v["avg_succ_rate"] for v in variant_metrics.values()]
+    avg_variant = float(sum(vals) / len(vals)) if vals else 0.0
     summary = {
         "config_name": args.config_name,
         "svd_dir": args.svd_dir,
         "jac_dir_act": args.jac_dir_act,
+        "perturb_spec": args.perturb_spec,
         "lqr": {
             "lambda_scale": args.lambda_scale,
             "q_scale": args.q_scale,
             "r_scale": args.r_scale,
             "qf_scale": args.qf_scale,
         },
-        "nominal": nominal_metrics,
-        "perturbed": variant_metrics if args.perturb_spec else {},
+        "perturbed": variant_metrics,
         "avg_succ_rate_over_variants": avg_variant,
     }
     out_fp = Path(out_root) / "summary.json"
