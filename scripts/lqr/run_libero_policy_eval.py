@@ -81,6 +81,12 @@ def main() -> None:
         default=None,
         help="Override noise RNG seed base (ctrlwam eval uses 99; collect uses 0).",
     )
+    parser.add_argument(
+        "--random-camera-base-seed",
+        type=int,
+        default=None,
+        help="Override base_seed for camera variants (ctrlwam camera eval uses 99).",
+    )
     parser.add_argument("--out-dir", type=str, required=True)
     parser.add_argument(
         "--save-root",
@@ -113,6 +119,7 @@ def main() -> None:
         gripper_xyz_base_seed=args.gripper_xyz_base_seed,
         agentview_noise_sigma=args.agentview_noise_sigma,
         agentview_noise_seed_base=args.agentview_noise_seed_base,
+        random_camera_base_seed=args.random_camera_base_seed,
     )
     if not variants:
         raise ValueError(
@@ -167,6 +174,7 @@ def main() -> None:
         "gripper_xyz_base_seed": args.gripper_xyz_base_seed,
         "agentview_noise_sigma": args.agentview_noise_sigma,
         "agentview_noise_seed_base": args.agentview_noise_seed_base,
+        "random_camera_base_seed": args.random_camera_base_seed,
         "num_episodes": args.num_episodes,
         "resume": args.resume,
         "server_save_root": args.save_root,

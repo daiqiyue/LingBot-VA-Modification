@@ -145,6 +145,27 @@ def build_client_cmd(
                 str(float(variant.get("fov_sigma_deg", variant.get("fov_sigma", 5.0)))),
             ]
             cmd += ["--random-camera-base-seed", str(int(variant.get("base_seed", 42)))]
+            cmd += ["--random-camera-name", str(variant.get("camera_name", "agentview"))]
+            cmd += [
+                "--random-camera-workspace-table-z",
+                str(float(variant.get("workspace_table_z", 0.90))),
+            ]
+            cmd += [
+                "--random-camera-workspace-visible-fraction",
+                str(float(variant.get("workspace_visible_fraction", 0.55))),
+            ]
+            cmd += [
+                "--random-camera-visibility-margin-px",
+                str(int(variant.get("visibility_margin_px", 8))),
+            ]
+            cmd += [
+                "--random-camera-image-size",
+                str(int(variant.get("image_size", 128))),
+            ]
+            cmd += [
+                "--random-camera-max-rejection-attempts",
+                str(int(variant.get("max_rejection_attempts", 2000))),
+            ]
             if not bool(variant.get("enforce_visibility", True)):
                 cmd += ["--disable-random-camera-visibility"]
         if kind in _INIT_POS_KINDS:

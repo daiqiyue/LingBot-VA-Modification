@@ -118,6 +118,25 @@ def _obs_from_npz(npz_obj, idx: int, cam_keys: List[str]) -> Dict:
     return {"obs": [{cam_keys[0]: np.ascontiguousarray(cam0), cam_keys[1]: np.ascontiguousarray(cam1)}]}
 
 
+def _cache_prompt_for_reuse(server, prompt: str):
+    """Encode a fixed prompt once, then reuse it across SVD pair rollouts."""
+    with torch.no_grad():
+        server._reset(prompt=prompt)
+    prompt_embeds = server.prompt_embeds.detach() if server.prompt_embeds is not None else None
+    negative_prompt_embeds = (
+        server.negative_prompt_embeds.detach()
+        if server.negative_prompt_embeds is not None
+        else None
+    )
+    return prompt_embeds, negative_prompt_embeds
+
+
+def _reset_with_cached_prompt(server, prompt_cache) -> None:
+    with torch.no_grad():
+        server._reset(prompt=None)
+    server.prompt_embeds, server.negative_prompt_embeds = prompt_cache
+
+
 def _parse_int_csv(value: str) -> List[int]:
     return [int(x.strip()) for x in value.split(",") if x.strip()]
 
@@ -277,22 +296,28 @@ def main() -> None:
             raise ValueError(f"No paired NPZ rows available for SVD under {args.pairs_dir}")
         print(f"[svd] using {n_total}/{n_pos} paired rows (num_samples={args.num_samples})")
         diffs = {(l, t): [] for l in layers for t in selected_timesteps}
+        prompt_cache = _cache_prompt_for_reuse(server, prompt)
         try:
             for i in range(n_total):
                 obs_pos = _obs_from_npz(pos, i, cam_keys)
                 obs_neg = _obs_from_npz(neg, i, cam_keys)
-                server._reset(prompt=prompt)
+                _reset_with_cached_prompt(server, prompt_cache)
                 tracer.reset_chunk()
-                server._infer(obs_pos, frame_st_id=0)
+                with torch.no_grad():
+                    server._infer(obs_pos, frame_st_id=0)
                 cap_pos = dict(tracer.captured)
-                server._reset(prompt=prompt)
+                _reset_with_cached_prompt(server, prompt_cache)
                 tracer.reset_chunk()
-                server._infer(obs_neg, frame_st_id=0)
+                with torch.no_grad():
+                    server._infer(obs_neg, frame_st_id=0)
                 cap_neg = dict(tracer.captured)
                 for key in diffs:
                     if key not in cap_pos or key not in cap_neg:
                         raise RuntimeError(f"Missing activation key {key} at sample {i}.")
                     diffs[key].append((cap_pos[key] - cap_neg[key]).float().cpu())
+                del cap_pos, cap_neg, obs_pos, obs_neg
+                if torch.cuda.is_available() and (i + 1) % 25 == 0:
+                    torch.cuda.empty_cache()
         finally:
             tracer.close()
             transformer.forward = original_forward

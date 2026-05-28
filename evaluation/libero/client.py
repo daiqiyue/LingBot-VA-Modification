@@ -329,11 +329,8 @@ def init_single_env(env_in, init_state, init_perturb=None, episode_idx=0):
 
 
 def _noise_rng_for_episode(seed_base, episode_idx):
-    seed_base = int(seed_base)
-    episode_idx = int(episode_idx)
-    if seed_base == 0:
-        return np.random.default_rng(seed=episode_idx)
-    return np.random.default_rng(np.random.SeedSequence([seed_base, episode_idx]))
+    """Match ctrlwam EpisodeNoise: rng(seed=noise_seed_base + episode_idx)."""
+    return np.random.default_rng(seed=int(seed_base) + int(episode_idx))
 
 
 def apply_eef_delta_preposition(
@@ -418,7 +415,13 @@ def run_one(
     random_camera_rot_sigma_deg=8.0,
     random_camera_fov_sigma=5.0,
     random_camera_base_seed=42,
+    random_camera_name="agentview",
     random_camera_enforce_visibility=True,
+    random_camera_workspace_table_z=0.90,
+    random_camera_workspace_visible_fraction=0.55,
+    random_camera_visibility_margin_px=8,
+    random_camera_image_size=128,
+    random_camera_max_rejection_attempts=2000,
     gripper_xyz_preset=None,
     gripper_xyz_base_seed=42,
 ):
@@ -455,12 +458,18 @@ def run_one(
             rot_sigma_rad=float(np.radians(float(random_camera_rot_sigma_deg))),
             fov_sigma=float(random_camera_fov_sigma),
             base_seed=int(random_camera_base_seed),
+            camera_name=str(random_camera_name),
             enforce_visibility=bool(random_camera_enforce_visibility),
-            image_size=128,
-            name_hint="eval_cam_random",
+            workspace_table_z=float(random_camera_workspace_table_z),
+            workspace_visible_fraction=float(random_camera_workspace_visible_fraction),
+            visibility_margin_px=int(random_camera_visibility_margin_px),
+            image_size=int(random_camera_image_size),
+            max_rejection_attempts=int(random_camera_max_rejection_attempts),
+            name_hint="cam_random_large",
         )
         cam_perturb.apply_to_env(cur_env, episode_idx=episode_idx)
         raw_obs, _, _, _ = cur_env.step([0.] * 7)
+        print(f"Applied camera perturbation: {cam_perturb.manifest()} sample={getattr(cam_perturb, '_last_sample', {})}")
     full_obs_list = []
     phase_labels = []
     noise_rng = _noise_rng_for_episode(agentview_noise_seed_base, episode_idx)
@@ -491,16 +500,15 @@ def run_one(
                 if done:
                     break
                 if (j+1) % action_per_frame == 0:
-                    full_obs_list.append(observes)
-                    phase_labels.append("inference")
-                    key_frame_list.append(
-                        _apply_agentview_noise_to_obs(
-                            observes,
-                            sigma=agentview_noise_sigma,
-                            rng=noise_rng,
-                            apply_wrist=noise_apply_wrist,
-                        )
+                    noisy_obs = _apply_agentview_noise_to_obs(
+                        observes,
+                        sigma=agentview_noise_sigma,
+                        rng=noise_rng,
+                        apply_wrist=noise_apply_wrist,
                     )
+                    full_obs_list.append(noisy_obs)
+                    phase_labels.append("inference")
+                    key_frame_list.append(noisy_obs)
 
             if done:
                 break
@@ -541,7 +549,13 @@ def run(
     random_camera_rot_sigma_deg=8.0,
     random_camera_fov_sigma=5.0,
     random_camera_base_seed=42,
+    random_camera_name="agentview",
     random_camera_enforce_visibility=True,
+    random_camera_workspace_table_z=0.90,
+    random_camera_workspace_visible_fraction=0.55,
+    random_camera_visibility_margin_px=8,
+    random_camera_image_size=128,
+    random_camera_max_rejection_attempts=2000,
     gripper_xyz_preset=None,
     gripper_xyz_base_seed=42,
     resume=False,
@@ -600,7 +614,13 @@ def run(
                 random_camera_rot_sigma_deg=random_camera_rot_sigma_deg,
                 random_camera_fov_sigma=random_camera_fov_sigma,
                 random_camera_base_seed=random_camera_base_seed,
+                random_camera_name=random_camera_name,
                 random_camera_enforce_visibility=random_camera_enforce_visibility,
+                random_camera_workspace_table_z=random_camera_workspace_table_z,
+                random_camera_workspace_visible_fraction=random_camera_workspace_visible_fraction,
+                random_camera_visibility_margin_px=random_camera_visibility_margin_px,
+                random_camera_image_size=random_camera_image_size,
+                random_camera_max_rejection_attempts=random_camera_max_rejection_attempts,
                 gripper_xyz_preset=gripper_xyz_preset,
                 gripper_xyz_base_seed=gripper_xyz_base_seed,
             )
@@ -692,6 +712,12 @@ def main():
     parser.add_argument("--random-camera-rot-sigma-deg", type=float, default=8.0)
     parser.add_argument("--random-camera-fov-sigma", type=float, default=5.0)
     parser.add_argument("--random-camera-base-seed", type=int, default=42)
+    parser.add_argument("--random-camera-name", type=str, default="agentview")
+    parser.add_argument("--random-camera-workspace-table-z", type=float, default=0.90)
+    parser.add_argument("--random-camera-workspace-visible-fraction", type=float, default=0.55)
+    parser.add_argument("--random-camera-visibility-margin-px", type=int, default=8)
+    parser.add_argument("--random-camera-image-size", type=int, default=128)
+    parser.add_argument("--random-camera-max-rejection-attempts", type=int, default=2000)
     parser.add_argument("--disable-random-camera-visibility", action="store_true")
     parser.add_argument(
         "--gripper-xyz-preset",
