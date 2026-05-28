@@ -217,20 +217,24 @@ fi
 fi
 
 echo "[4/5] compute projected jacobians (ctrlwam-aligned VJP)"
-JAC_CMD=(
-  python scripts/lqr/run_compute_jacobians.py
-  --svd-dir "${SVD_DIR}"
-  --out-subdir "${JAC_SUBDIR}"
-  --inputs-npz "${PAIRS_DIR_FOR_SVD}/negative.npz"
-  --obs-index "${JAC_OBS_INDEX:-0}"
-  --config-name "${CONFIG_NAME}"
-  --num-shards "${JAC_NUM_SHARDS:-1}"
-  --method "${JAC_METHOD:-vjp}"
-)
-if [[ "${JAC_RESUME}" == "1" ]]; then
-  JAC_CMD+=(--resume)
+if [[ -z "${FORCE_STEP4:-}" && -f "${SVD_DIR}/${JAC_SUBDIR}/A_tilde__full.pt" ]]; then
+  echo "[4/5] skip jacobian, existing artifact found: ${SVD_DIR}/${JAC_SUBDIR}/A_tilde__full.pt"
+else
+  JAC_CMD=(
+    python scripts/lqr/run_compute_jacobians.py
+    --svd-dir "${SVD_DIR}"
+    --out-subdir "${JAC_SUBDIR}"
+    --inputs-npz "${PAIRS_DIR_FOR_SVD}/negative.npz"
+    --obs-index "${JAC_OBS_INDEX:-0}"
+    --config-name "${CONFIG_NAME}"
+    --num-shards "${JAC_NUM_SHARDS:-1}"
+    --method "${JAC_METHOD:-vjp}"
+  )
+  if [[ "${JAC_RESUME}" == "1" ]]; then
+    JAC_CMD+=(--resume)
+  fi
+  "${JAC_CMD[@]}"
 fi
-"${JAC_CMD[@]}"
 
 if [[ "${SKIP_EVAL}" == "1" ]]; then
   echo "[5/5] skipped eval (SKIP_EVAL=1)"

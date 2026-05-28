@@ -85,7 +85,10 @@ class VA_Server:
             torch_device=self.device,
             attn_mode="torch"
         )
-        shard_fn = shard_model
+        if getattr(job_config, "lqr_disable_fsdp", False):
+            shard_fn = lambda model, **kwargs: model
+        else:
+            shard_fn = shard_model
         self.transformer = _configure_model(model=self.transformer,
                                             shard_fn=shard_fn,
                                             param_dtype=self.dtype,

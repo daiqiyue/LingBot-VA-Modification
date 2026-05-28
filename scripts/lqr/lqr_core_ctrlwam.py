@@ -6,6 +6,23 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import torch
 
 
+def _solve_with_jitter(P: torch.Tensor, F: torch.Tensor) -> torch.Tensor:
+    solution, info = torch.linalg.solve_ex(P, F)
+    if int(info.max().item()) == 0 and torch.isfinite(solution).all():
+        return solution
+
+    n = P.shape[-1]
+    eye = torch.eye(n, dtype=P.dtype, device=P.device)
+    scale = torch.linalg.matrix_norm(P.detach(), ord=float("inf")).clamp_min(1.0)
+    for eps in (1e-8, 1e-7, 1e-6, 1e-5, 1e-4):
+        P_reg = P + (eps * scale) * eye
+        solution, info = torch.linalg.solve_ex(P_reg, F)
+        if int(info.max().item()) == 0 and torch.isfinite(solution).all():
+            return solution
+
+    return torch.linalg.pinv(P) @ F
+
+
 class VCache:
     def __init__(
         self,
@@ -123,7 +140,7 @@ def chained_riccati(
         P = S[k + 1] + R_chain[k]
         F = S[k + 1] @ Ak
         G = Q_chain[k] + Ak.transpose(-2, -1) @ S[k + 1] @ Ak
-        Kk = torch.linalg.solve(P, F)
+        Kk = _solve_with_jitter(P, F)
         K[k] = Kk
         Snew = G - F.transpose(-2, -1) @ Kk
         S[k] = 0.5 * (Snew + Snew.transpose(-2, -1))
@@ -190,7 +207,7 @@ def chained_riccati_per_chunk(
             P = S[k + 1] + R_chain[k]
             F = S[k + 1] @ Ak
             G = Q_chain[k] + Ak.transpose(-2, -1) @ S[k + 1] @ Ak
-            Kk = torch.linalg.solve(P, F)
+            Kk = _solve_with_jitter(P, F)
             K[k] = Kk
             Snew = G - F.transpose(-2, -1) @ Kk
             S[k] = 0.5 * (Snew + Snew.transpose(-2, -1))

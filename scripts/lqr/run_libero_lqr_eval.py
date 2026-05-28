@@ -66,7 +66,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--startup-wait-sec", type=int, default=240)
     parser.add_argument("--svd-dir", type=str, required=True)
-    parser.add_argument("--jac-dir-act", type=str, default="A_tilde_lingbot")
+    parser.add_argument("--jac-dir-act", type=str, default=None)
     parser.add_argument("--lqr-config", type=str, default=None)
     parser.add_argument("--lambda-scale", type=float, default=1.0)
     parser.add_argument("--q-scale", type=float, default=10000.0)
@@ -134,8 +134,10 @@ def main() -> None:
         cfg_modality = str(cfg.get("modality", "")).strip().lower()
         if cfg_modality in {"action", "video", "both"}:
             args.inject_mode = cfg_modality
-    if cfg.get("jac_dir_act"):
+    if args.jac_dir_act is None and cfg.get("jac_dir_act"):
         args.jac_dir_act = str(cfg["jac_dir_act"])
+    elif args.jac_dir_act is None:
+        args.jac_dir_act = "A_tilde_lingbot"
 
     if not args.perturb_spec:
         raise ValueError("--perturb-spec is required (nominal eval is skipped; only perturbed variants are run).")

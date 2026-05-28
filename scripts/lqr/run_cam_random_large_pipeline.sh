@@ -86,7 +86,8 @@ if should_run_step 1; then
   if [[ -z "${FORCE_STEP1:-}" && -f "${PAIRS_DIR}/positive.npz" && -f "${PAIRS_DIR}/negative.npz" ]]; then
     echo "[skip] pair NPZs already exist under ${PAIRS_DIR}"
   else
-    python scripts/lqr/run_collect_pairs.py \
+    COLLECT_CMD=(
+      python scripts/lqr/run_collect_pairs.py
       --config-name "${CONFIG_NAME}" \
       --libero-benchmark "${LIBERO_BENCHMARK}" \
       --task-id "${TASK_ID}" \
@@ -95,6 +96,14 @@ if should_run_step 1; then
       --n-neg-rollouts "${N_NEG}" \
       --perturb-spec "${PERTURB_SPEC}" \
       --out-dir "${PAIRS_DIR}"
+    )
+    if ! "${COLLECT_CMD[@]}"; then
+      if [[ -f "${PAIRS_DIR}/positive.npz" && -f "${PAIRS_DIR}/negative.npz" ]]; then
+        echo "[warn] collect command exited non-zero, but pair NPZs exist; continuing with ${PAIRS_DIR}"
+      else
+        exit 1
+      fi
+    fi
   fi
 fi
 

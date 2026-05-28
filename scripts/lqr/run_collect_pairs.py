@@ -256,6 +256,29 @@ def _write_video(frames: List[np.ndarray], path: Path, fps: int):
     imageio.mimsave(str(path), frames, fps=int(fps))
 
 
+def _write_paired_outputs(
+    out_dir: Path,
+    prompt: str,
+    pos_rows: List[Dict[str, np.ndarray]],
+    neg_rows: List[Dict[str, np.ndarray]],
+    ep_idx: List[int],
+    inf_idx: List[int],
+    drive_source: List[int],
+) -> Optional[float]:
+    if not pos_rows or not neg_rows:
+        return None
+    pos = _stack(pos_rows)
+    neg = _stack(neg_rows)
+    ep_arr = np.asarray(ep_idx, dtype=np.int32)
+    inf_arr = np.asarray(inf_idx, dtype=np.int32)
+    ds_arr = np.asarray(drive_source, dtype=np.int32)
+    cfg_arr = np.zeros_like(ep_arr, dtype=np.int32)
+    np.savez_compressed(out_dir / "positive.npz", **pos, episode_idx=ep_arr, inference_idx=inf_arr, drive_source=ds_arr, config_idx=cfg_arr)
+    np.savez_compressed(out_dir / "negative.npz", **neg, episode_idx=ep_arr, inference_idx=inf_arr, drive_source=ds_arr, config_idx=cfg_arr)
+    (out_dir / "prompt.txt").write_text(prompt + "\n", encoding="utf-8")
+    return float(np.max(np.abs(pos["proprios"] - neg["proprios"])))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Collect ctrlwam-style paired LingBot LIBERO observations for LQR.")
     parser.add_argument("--config-name", type=str, default="libero")
@@ -270,6 +293,11 @@ def main():
     parser.add_argument("--wait-steps", type=int, default=10)
     parser.add_argument("--video-fps", type=int, default=60)
     parser.add_argument("--disable-video", action="store_true")
+    parser.add_argument(
+        "--close-envs",
+        action="store_true",
+        help="Explicitly close robosuite environments before writing outputs. Disabled by default because EGL/MuJoCo can abort during close on some Slurm nodes.",
+    )
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -311,68 +339,77 @@ def main():
     summaries: List[Dict[str, Any]] = []
     videos: List[np.ndarray] = []
 
-    try:
-        if is_noise:
-            for ep in range(min(n_pos, max_ep)):
-                success, records = _record_clean_drive(server, env_pos, init_states[ep], prompt, cam_keys, args.max_env_steps, ep, args.wait_steps)
-                for rec in records:
-                    pos_rows.append(rec["stored"])
-                    neg_rows.append(_store_from_raw(rec["raw_obs"], cam_keys, perturb=perturb, episode_idx=ep, inference_idx=rec["inference_idx"]))
-                    ep_idx.append(ep)
-                    inf_idx.append(int(rec["inference_idx"]))
-                    drive_source.append(0)
-                summaries.append({"episode": ep, "drive_source": 0, "success": bool(success), "n_inferences": len(records)})
-        elif is_camera:
-            for ep in range(min(n_pos, max_ep)):
-                success, records = _record_clean_drive(server, env_pos, init_states[ep], prompt, cam_keys, args.max_env_steps, ep, args.wait_steps)
-                neg_stored = _replay_states(env_neg, init_states[ep], records, perturb, cam_keys, ep, args.wait_steps)
-                for rec, neg in zip(records, neg_stored):
-                    pos_rows.append(rec["stored"])
-                    neg_rows.append(neg)
-                    ep_idx.append(ep)
-                    inf_idx.append(int(rec["inference_idx"]))
-                    drive_source.append(1)
-                summaries.append({"episode": ep, "drive_source": 1, "success": bool(success), "n_inferences": len(records), "perturb_sample": getattr(perturb, "_last_sample", {})})
-            for ep in range(min(n_neg, max_ep)):
-                success, pos_stored, neg_stored = _rollout_neg_drive(server, env_neg, env_pos, init_states[ep], prompt, perturb, cam_keys, args.max_env_steps, ep, args.wait_steps)
-                for j, (pos, neg) in enumerate(zip(pos_stored, neg_stored)):
-                    pos_rows.append(pos)
-                    neg_rows.append(neg)
-                    ep_idx.append(ep)
-                    inf_idx.append(j)
-                    drive_source.append(0)
-                summaries.append({"episode": ep, "drive_source": 0, "success": bool(success), "n_inferences": len(pos_stored), "perturb_sample": getattr(perturb, "_last_sample", {})})
-        elif is_init:
-            for ep in range(min(n_pos, max_ep)):
-                success, records = _record_drive(
-                    server,
-                    env_neg,
-                    init_states[ep],
-                    prompt,
-                    cam_keys,
-                    args.max_env_steps,
-                    ep,
-                    args.wait_steps,
-                    perturb=perturb,
-                )
-                target_rows = pos_rows if success else neg_rows
-                for rec in records:
-                    target_rows.append(rec["stored"])
-                    ep_idx.append(ep)
-                    inf_idx.append(int(rec["inference_idx"]))
-                    drive_source.append(0)
-                summaries.append(
-                    {
-                        "episode": ep,
-                        "drive_source": 0,
-                        "success": bool(success),
-                        "n_inferences": len(records),
-                        "perturb_sample": getattr(perturb, "_last_sample", {}),
-                    }
-                )
-        else:
-            raise ValueError("nominal perturbation does not produce contrastive pairs")
-    finally:
+    if is_noise:
+        for ep in range(min(n_pos, max_ep)):
+            print(f"[collect-pairs] noise clean episode {ep + 1}/{min(n_pos, max_ep)}", flush=True)
+            success, records = _record_clean_drive(server, env_pos, init_states[ep], prompt, cam_keys, args.max_env_steps, ep, args.wait_steps)
+            for rec in records:
+                pos_rows.append(rec["stored"])
+                neg_rows.append(_store_from_raw(rec["raw_obs"], cam_keys, perturb=perturb, episode_idx=ep, inference_idx=rec["inference_idx"]))
+                ep_idx.append(ep)
+                inf_idx.append(int(rec["inference_idx"]))
+                drive_source.append(0)
+            summaries.append({"episode": ep, "drive_source": 0, "success": bool(success), "n_inferences": len(records)})
+            max_dproprio = _write_paired_outputs(args.out_dir, prompt, pos_rows, neg_rows, ep_idx, inf_idx, drive_source)
+            print(f"[collect-pairs] checkpoint rows={len(ep_idx)} paired_proprio_max_abs_diff={max_dproprio:.3e}", flush=True)
+    elif is_camera:
+        for ep in range(min(n_pos, max_ep)):
+            print(f"[collect-pairs] camera clean-drive episode {ep + 1}/{min(n_pos, max_ep)}", flush=True)
+            success, records = _record_clean_drive(server, env_pos, init_states[ep], prompt, cam_keys, args.max_env_steps, ep, args.wait_steps)
+            neg_stored = _replay_states(env_neg, init_states[ep], records, perturb, cam_keys, ep, args.wait_steps)
+            for rec, neg in zip(records, neg_stored):
+                pos_rows.append(rec["stored"])
+                neg_rows.append(neg)
+                ep_idx.append(ep)
+                inf_idx.append(int(rec["inference_idx"]))
+                drive_source.append(1)
+            summaries.append({"episode": ep, "drive_source": 1, "success": bool(success), "n_inferences": len(records), "perturb_sample": getattr(perturb, "_last_sample", {})})
+            max_dproprio = _write_paired_outputs(args.out_dir, prompt, pos_rows, neg_rows, ep_idx, inf_idx, drive_source)
+            print(f"[collect-pairs] checkpoint rows={len(ep_idx)} paired_proprio_max_abs_diff={max_dproprio:.3e}", flush=True)
+        for ep in range(min(n_neg, max_ep)):
+            print(f"[collect-pairs] camera perturbed-drive episode {ep + 1}/{min(n_neg, max_ep)}", flush=True)
+            success, pos_stored, neg_stored = _rollout_neg_drive(server, env_neg, env_pos, init_states[ep], prompt, perturb, cam_keys, args.max_env_steps, ep, args.wait_steps)
+            for j, (pos, neg) in enumerate(zip(pos_stored, neg_stored)):
+                pos_rows.append(pos)
+                neg_rows.append(neg)
+                ep_idx.append(ep)
+                inf_idx.append(j)
+                drive_source.append(0)
+            summaries.append({"episode": ep, "drive_source": 0, "success": bool(success), "n_inferences": len(pos_stored), "perturb_sample": getattr(perturb, "_last_sample", {})})
+            max_dproprio = _write_paired_outputs(args.out_dir, prompt, pos_rows, neg_rows, ep_idx, inf_idx, drive_source)
+            print(f"[collect-pairs] checkpoint rows={len(ep_idx)} paired_proprio_max_abs_diff={max_dproprio:.3e}", flush=True)
+    elif is_init:
+        for ep in range(min(n_pos, max_ep)):
+            success, records = _record_drive(
+                server,
+                env_neg,
+                init_states[ep],
+                prompt,
+                cam_keys,
+                args.max_env_steps,
+                ep,
+                args.wait_steps,
+                perturb=perturb,
+            )
+            target_rows = pos_rows if success else neg_rows
+            for rec in records:
+                target_rows.append(rec["stored"])
+                ep_idx.append(ep)
+                inf_idx.append(int(rec["inference_idx"]))
+                drive_source.append(0)
+            summaries.append(
+                {
+                    "episode": ep,
+                    "drive_source": 0,
+                    "success": bool(success),
+                    "n_inferences": len(records),
+                    "perturb_sample": getattr(perturb, "_last_sample", {}),
+                }
+            )
+    else:
+        raise ValueError("nominal perturbation does not produce contrastive pairs")
+
+    if args.close_envs:
         env_pos.close()
         env_neg.close()
 
