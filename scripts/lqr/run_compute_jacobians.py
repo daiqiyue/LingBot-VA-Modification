@@ -70,6 +70,8 @@ def _build_server(config_name: str):
     cfg.rank = 0
     cfg.local_rank = 0
     cfg.world_size = 1
+    # VJP autograd through blocks is incompatible with FSDP DTensor mixing.
+    cfg.lqr_disable_fsdp = True
     return VA_Server(cfg)
 
 
@@ -100,11 +102,20 @@ def make_layer_shards(num_l_in: int, num_shards: int) -> List[List[int]]:
     return chunks
 
 
+def _to_local_tensor(t: torch.Tensor) -> torch.Tensor:
+    if hasattr(t, "to_local"):
+        try:
+            t = t.to_local()
+        except Exception:
+            pass
+    return t.detach().clone()
+
+
 def _to_normal(t):
     if torch.is_tensor(t):
-        return t.detach().clone()
-    if isinstance(t, tuple):
-        return tuple(_to_normal(x) for x in t)
+        return _to_local_tensor(t)
+    if isinstance(t, (tuple, list)):
+        return type(t)(_to_normal(x) for x in t)
     return t
 
 
@@ -408,6 +419,7 @@ def run_vjp_worker(args: argparse.Namespace) -> int:
         raise ValueError("Prompt required (--prompt or svd config.json prompt).")
 
     server = _build_server(config_name)
+    log("loaded VA_Server with lqr_disable_fsdp=True (local transformer for VJP)")
     server.vae.eval().requires_grad_(False)
     server.text_encoder.eval().requires_grad_(False)
     if getattr(server, "streaming_vae_half", None) is not None:
@@ -524,6 +536,8 @@ def run_vjp_worker(args: argparse.Namespace) -> int:
                     )
             finally:
                 in_ad["flag"] = False
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
             jac_store[(step, l_in)] = j_tilde.detach().to(torch.float32).cpu()
             done = len(jac_store)

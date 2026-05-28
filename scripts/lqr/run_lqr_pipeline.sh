@@ -38,6 +38,7 @@ COLLECT_MODE="${COLLECT_MODE:-action}"
 PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_camera.yaml}"
 EXISTING_COLLECT_DIR="${EXISTING_COLLECT_DIR:-}"
 EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-}"
+EXISTING_SVD_DIR="${EXISTING_SVD_DIR:-}"
 K_TARGET="${K_TARGET:-64}"
 P_OVER="${P_OVER:-10}"
 PARTITIONS="${PARTITIONS:-}"
@@ -46,6 +47,7 @@ JAC_METHOD="${JAC_METHOD:-vjp}"
 JAC_OBS_INDEX="${JAC_OBS_INDEX:-0}"
 JAC_NUM_SHARDS="${JAC_NUM_SHARDS:-1}"
 JAC_SUBDIR="${JAC_SUBDIR:-A_tilde_lingbot}"
+JAC_RESUME="${JAC_RESUME:-0}"
 
 OUT_BASE="${OUT_BASE:-outputs/lqr}"
 PERTURB_SPEC_BASENAME="$(basename -- "${PERTURB_SPEC}")"
@@ -89,6 +91,7 @@ echo "PERTURB_SPEC=${PERTURB_SPEC}"
 echo "PERTURB_TAG=${PERTURB_TAG}"
 echo "EXISTING_COLLECT_DIR=${EXISTING_COLLECT_DIR:-<none>}"
 echo "EXISTING_PAIRS_ALL_DIR=${EXISTING_PAIRS_ALL_DIR:-<none>}"
+echo "EXISTING_SVD_DIR=${EXISTING_SVD_DIR:-<none>}"
 echo "PAIRS_DIR=${PAIRS_DIR}"
 echo "PAIRS_ALL_DIR=${PAIRS_ALL_DIR}"
 echo "PAIRED_DIR=${PAIRED_DIR}"
@@ -181,6 +184,18 @@ else
 fi
 
 echo "[3/5] run SVD / build contrastive vectors"
+if [[ -n "${EXISTING_SVD_DIR}" ]]; then
+  if [[ ! -f "${EXISTING_SVD_DIR}/config.json" ]]; then
+    echo "[error] EXISTING_SVD_DIR missing config.json: ${EXISTING_SVD_DIR}" >&2
+    exit 2
+  fi
+  if [[ ! -f "${EXISTING_SVD_DIR}/svd_summary.pt" ]]; then
+    echo "[error] EXISTING_SVD_DIR missing svd_summary.pt: ${EXISTING_SVD_DIR}" >&2
+    exit 2
+  fi
+  SVD_DIR="${EXISTING_SVD_DIR}"
+  echo "[3/5] skip SVD, reuse existing artifacts: ${SVD_DIR}"
+else
 SVD_CMD=(
   python scripts/lqr/run_partition_svd.py
   --pairs-dir "${PAIRS_DIR_FOR_SVD}"
@@ -199,16 +214,23 @@ if [[ -n "${PROMPT}" ]]; then
   SVD_CMD+=(--prompt "${PROMPT}")
 fi
 "${SVD_CMD[@]}"
+fi
 
 echo "[4/5] compute projected jacobians (ctrlwam-aligned VJP)"
-python scripts/lqr/run_compute_jacobians.py \
-  --svd-dir "${SVD_DIR}" \
-  --out-subdir "${JAC_SUBDIR}" \
-  --inputs-npz "${PAIRS_DIR_FOR_SVD}/negative.npz" \
-  --obs-index "${JAC_OBS_INDEX:-0}" \
-  --config-name "${CONFIG_NAME}" \
-  --num-shards "${JAC_NUM_SHARDS:-1}" \
+JAC_CMD=(
+  python scripts/lqr/run_compute_jacobians.py
+  --svd-dir "${SVD_DIR}"
+  --out-subdir "${JAC_SUBDIR}"
+  --inputs-npz "${PAIRS_DIR_FOR_SVD}/negative.npz"
+  --obs-index "${JAC_OBS_INDEX:-0}"
+  --config-name "${CONFIG_NAME}"
+  --num-shards "${JAC_NUM_SHARDS:-1}"
   --method "${JAC_METHOD:-vjp}"
+)
+if [[ "${JAC_RESUME}" == "1" ]]; then
+  JAC_CMD+=(--resume)
+fi
+"${JAC_CMD[@]}"
 
 if [[ "${SKIP_EVAL}" == "1" ]]; then
   echo "[5/5] skipped eval (SKIP_EVAL=1)"
