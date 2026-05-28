@@ -1,13 +1,15 @@
 START=0
 END=1
 
-PORT="${PORT:-$((29056 + (${SLURM_JOB_ID:-0} % 1000)))}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+# shellcheck source=../../scripts/lqr/slurm_port.sh
+source "${SCRIPT_DIR}/../../scripts/lqr/slurm_port.sh"
 
 CAMERA_ARGS=${CAMERA_ARGS:-}
 PYTHONPATH=. python evaluation/libero/client.py \
     --libero-benchmark libero_10 \
     --port "${PORT}" \
-    --test-num 10 \
+    --test-num 20 \
     --task-range $START $END \
     --out-dir outputs/libero/task0_camera_init_pos_0.2 \
     --eef-delta 0.00 0.20 0.00 \

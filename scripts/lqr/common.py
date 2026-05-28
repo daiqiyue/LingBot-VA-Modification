@@ -63,6 +63,47 @@ def parse_int_list(value: str) -> List[int]:
     return [int(v.strip()) for v in value.split(",") if v.strip()]
 
 
+def parse_partitions(spec: str, num_layers: int) -> List[tuple[int, int]]:
+    """Parse ctrlwam-style partition spec, e.g. ``0-9,10-18,19-27``."""
+    parts: List[tuple[int, int]] = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        a, b = tok.split("-")
+        parts.append((int(a), int(b)))
+    covered = [layer for l_start, l_end in parts for layer in range(l_start, l_end + 1)]
+    if sorted(covered) != list(range(num_layers)):
+        raise ValueError(
+            f"partitions {parts} must tile [0, {num_layers - 1}] exactly; got layers {sorted(set(covered))}"
+        )
+    return parts
+
+
+def default_partitions_three(num_layers: int) -> str:
+    """Default 3-partition layout matching ctrlwam (contiguous layer groups)."""
+    if num_layers == 28:
+        return "0-9,10-18,19-27"
+    chunk = num_layers // 3
+    rem = num_layers % 3
+    sizes = [chunk + (1 if i < rem else 0) for i in range(3)]
+    tokens: List[str] = []
+    start = 0
+    for size in sizes:
+        end = start + size - 1
+        tokens.append(f"{start}-{end}")
+        start = end + 1
+    return ",".join(tokens)
+
+
+def layer_to_part_from_partitions(partitions: List[tuple[int, int]], num_layers: int) -> List[int]:
+    layer_to_part = [0] * num_layers
+    for p_idx, (l_start, l_end) in enumerate(partitions):
+        for layer in range(l_start, l_end + 1):
+            layer_to_part[layer] = p_idx
+    return layer_to_part
+
+
 def stable_run_id(parts: List[str]) -> str:
     digest = hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()[:12]
     return f"run_{digest}"
@@ -70,3 +111,13 @@ def stable_run_id(parts: List[str]) -> str:
 
 def now_ts() -> int:
     return int(time.time())
+
+
+def default_slurm_port(base: int = 29056) -> int:
+    """PORT_BASE + (SLURM_JOB_ID % 1000); honors PORT env if already set."""
+    port_env = os.environ.get("PORT", "").strip()
+    if port_env:
+        return int(port_env)
+    port_base = int(os.environ.get("PORT_BASE", str(base)))
+    job_id = int(os.environ.get("SLURM_JOB_ID", "0") or "0")
+    return port_base + (job_id % 1000)

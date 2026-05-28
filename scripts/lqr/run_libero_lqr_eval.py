@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from scripts.lqr.common import ensure_dir, maybe_load_yaml
+from scripts.lqr.common import ensure_dir, default_slurm_port, maybe_load_yaml
 
 
 def _wait_for_port(host: str, port: int, timeout_sec: int) -> bool:
@@ -50,6 +50,12 @@ def _build_server_cmd(args: argparse.Namespace) -> List[str]:
         str(args.q_scale),
         "--r-scale",
         str(args.r_scale),
+        "--r-scale-tau",
+        str(args.r_scale_tau),
+        "--r-scale-final",
+        str(args.r_scale_final),
+        "--max-chunks",
+        str(args.max_chunks),
         "--qf-scale",
         str(args.qf_scale),
         "--inject-mode",
@@ -81,20 +87,20 @@ def _build_client_cmd(args: argparse.Namespace, out_dir: str, variant: Optional[
     if args.prompt:
         cmd += ["--prompt", args.prompt]
     if variant:
-        if variant.get("eef_delta") is not None:
-            dx, dy, dz = variant["eef_delta"]
-            cmd += ["--eef-delta", str(dx), str(dy), str(dz)]
-        if variant.get("eef_preposition_steps") is not None:
-            cmd += ["--eef-preposition-steps", str(int(variant["eef_preposition_steps"]))]
-        if variant.get("eef_step_size") is not None:
-            cmd += ["--eef-step-size", str(float(variant["eef_step_size"]))]
-        if variant.get("eef_tolerance") is not None:
-            cmd += ["--eef-tolerance", str(float(variant["eef_tolerance"]))]
-        if variant.get("camera_rotate_deg") is not None:
-            cmd += ["--agentview-camera-rotate-deg", str(float(variant["camera_rotate_deg"]))]
-            cmd += ["--agentview-camera-rotate-axis", str(variant.get("camera_axis", "z"))]
-        if variant.get("image_noise_sigma") is not None:
-            cmd += ["--agentview-noise-sigma", str(float(variant["image_noise_sigma"]))]
+        kind = str(variant.get("kind", variant.get("type", ""))).lower()
+        if kind in {"gaussian", "image_gaussian_noise", "noise"}:
+            cmd += ["--agentview-noise-sigma", str(float(variant.get("sigma", 90.0)))]
+            cmd += ["--noise-apply-wrist"]
+        if kind in {"camera", "camera_view", "random_camera"}:
+            cmd += ["--random-camera-pos-sigma", str(float(variant.get("pos_sigma_m", variant.get("pos_sigma", 0.10))))]
+            cmd += ["--random-camera-rot-sigma-deg", str(float(variant.get("rot_sigma_deg", 8.0)))]
+            cmd += ["--random-camera-fov-sigma", str(float(variant.get("fov_sigma_deg", variant.get("fov_sigma", 5.0))))]
+            cmd += ["--random-camera-base-seed", str(int(variant.get("base_seed", 42)))]
+            if not bool(variant.get("enforce_visibility", True)):
+                cmd += ["--disable-random-camera-visibility"]
+        if kind in {"init_position", "gripper_init", "init_pos", "gripper_xyz"}:
+            cmd += ["--gripper-xyz-preset", str(variant.get("preset", variant.get("name", "xyz_random_xlarge_3")))]
+            cmd += ["--gripper-xyz-base-seed", str(int(variant.get("base_seed", 42)))]
     return cmd
 
 
@@ -102,8 +108,18 @@ def _load_eval_variants(perturb_spec: Optional[str]) -> List[Dict[str, Any]]:
     if not perturb_spec:
         return []
     spec = maybe_load_yaml(perturb_spec)
+    if "perturbation" in spec:
+        perturb = dict(spec["perturbation"])
+        perturb.setdefault("name", perturb.get("kind", "perturbation"))
+        return [perturb]
     variants = list(spec.get("variants", []))
-    return [v for v in variants if str(v.get("name", "")) != "nominal"]
+    out = [v for v in variants if str(v.get("name", "")) != "nominal"]
+    for v in out:
+        if "kind" not in v:
+            raise ValueError(
+                "Eval perturb specs must use ctrlwam-style variant entries with explicit `kind`."
+            )
+    return out
 
 
 def _collect_task_metrics(out_dir: str, benchmark_name: str, task_range: List[int]) -> Dict[str, Any]:
@@ -131,9 +147,9 @@ def main() -> None:
     parser.add_argument("--config-name", type=str, default="libero")
     parser.add_argument("--libero-benchmark", type=str, default="libero_10")
     parser.add_argument("--task-range", type=int, nargs=2, default=[0, 1])
-    parser.add_argument("--num-episodes", type=int, default=10)
+    parser.add_argument("--num-episodes", type=int, default=20)
     parser.add_argument("--prompt", type=str, default=None)
-    parser.add_argument("--port", type=int, default=29056)
+    parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--startup-wait-sec", type=int, default=240)
     parser.add_argument("--svd-dir", type=str, required=True)
     parser.add_argument("--jac-dir-act", type=str, default="A_tilde_lingbot")
@@ -141,6 +157,9 @@ def main() -> None:
     parser.add_argument("--lambda-scale", type=float, default=1.0)
     parser.add_argument("--q-scale", type=float, default=10000.0)
     parser.add_argument("--r-scale", type=float, default=75000.0)
+    parser.add_argument("--r-scale-tau", type=float, default=3.0)
+    parser.add_argument("--r-scale-final", type=float, default=1e9)
+    parser.add_argument("--max-chunks", type=int, default=50)
     parser.add_argument("--qf-scale", type=float, default=1.0)
     parser.add_argument("--inject-mode", type=str, choices=["auto", "action", "video", "both"], default="auto")
     parser.add_argument("--perturb-spec", type=str, default=None)
@@ -159,10 +178,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.port is None:
+        args.port = default_slurm_port()
+
     cfg = _load_lqr_config(args.lqr_config)
     args.lambda_scale = float(cfg.get("lambda_scale", args.lambda_scale))
     args.q_scale = float(cfg.get("q_scale", args.q_scale))
     args.r_scale = float(cfg.get("r_scale", args.r_scale))
+    args.r_scale_tau = float(cfg.get("r_scale_tau", args.r_scale_tau))
+    args.r_scale_final = float(cfg.get("r_scale_final", args.r_scale_final))
+    args.max_chunks = int(cfg.get("max_chunks", args.max_chunks))
     args.qf_scale = float(cfg.get("qf_scale", args.qf_scale))
     cfg_inject_mode = cfg.get("inject_mode")
     if cfg_inject_mode is not None:
@@ -222,6 +247,9 @@ def main() -> None:
             "lambda_scale": args.lambda_scale,
             "q_scale": args.q_scale,
             "r_scale": args.r_scale,
+            "r_scale_tau": args.r_scale_tau,
+            "r_scale_final": args.r_scale_final,
+            "max_chunks": args.max_chunks,
             "qf_scale": args.qf_scale,
         },
         "perturbed": variant_metrics,

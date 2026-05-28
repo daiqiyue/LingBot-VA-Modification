@@ -12,6 +12,8 @@ import imageio
 import cv2
 import re
 
+from scripts.lqr.perturbations import RandomCameraViewPerturbation, build_gripper_xyz_preset
+
 
 _EPISODE_VIDEO_RE = re.compile(r"^(\d+)_(True|False)\.mp4$")
 
@@ -20,6 +22,7 @@ def _apply_agentview_noise_to_obs(
     obs_dict,
     sigma,
     rng: np.random.Generator,
+    apply_wrist=True,
 ):
     if sigma is None:
         return obs_dict
@@ -33,6 +36,10 @@ def _apply_agentview_noise_to_obs(
     img = out["observation.images.agentview_rgb"]
     noise = rng.normal(loc=0.0, scale=sigma_f, size=img.shape).astype(np.float32)
     out["observation.images.agentview_rgb"] = np.clip(img.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+    if apply_wrist:
+        wrist = out["observation.images.eye_in_hand_rgb"]
+        wrist_noise = rng.normal(loc=0.0, scale=sigma_f, size=wrist.shape).astype(np.float32)
+        out["observation.images.eye_in_hand_rgb"] = np.clip(wrist.astype(np.float32) + wrist_noise, 0, 255).astype(np.uint8)
     return out
 
 
@@ -310,12 +317,23 @@ def apply_agentview_camera_rotation(env_in, rotate_deg=None, rotate_axis="z"):
     )
 
 
-def init_single_env(env_in, init_state):
+def init_single_env(env_in, init_state, init_perturb=None, episode_idx=0):
     env_in.reset()
-    env_in.set_init_state(init_state)
-    for _ in range(5):
-        obs, _, _, _ = env_in.step([0.] * 7)
+    if init_perturb is None:
+        obs = env_in.set_init_state(init_state)
+    else:
+        obs = init_perturb.set_init_state(env_in, init_state, episode_idx=episode_idx)
+    for _ in range(10):
+        obs, _, _, _ = env_in.step([0., 0., 0., 0., 0., 0., -1.])
     return obs
+
+
+def _noise_rng_for_episode(seed_base, episode_idx):
+    seed_base = int(seed_base)
+    episode_idx = int(episode_idx)
+    if seed_base == 0:
+        return np.random.default_rng(seed=episode_idx)
+    return np.random.default_rng(np.random.SeedSequence([seed_base, episode_idx]))
 
 
 def apply_eef_delta_preposition(
@@ -393,14 +411,16 @@ def run_one(
     out_dir,
     episode_idx,
     prompt_override=None,
-    eef_delta=None,
-    eef_preposition_steps=80,
-    eef_step_size=0.01,
-    eef_tolerance=0.01,
-    agentview_camera_rotate_deg=None,
-    agentview_camera_rotate_axis="z",
     agentview_noise_sigma=None,
     agentview_noise_seed_base=0,
+    noise_apply_wrist=True,
+    random_camera_pos_sigma=None,
+    random_camera_rot_sigma_deg=8.0,
+    random_camera_fov_sigma=5.0,
+    random_camera_base_seed=42,
+    random_camera_enforce_visibility=True,
+    gripper_xyz_preset=None,
+    gripper_xyz_base_seed=42,
 ):
     benchmark_dict = benchmark.get_benchmark_dict()
     benchmark_instance = benchmark_dict[libero_benchmark]()
@@ -417,27 +437,33 @@ def run_one(
     init_states = benchmark_instance.get_task_init_states(task_idx)
 
     cur_env = construct_single_env(env_args)
-    raw_obs = init_single_env(cur_env, init_states[episode_idx % init_states.shape[0]])
-    apply_agentview_camera_rotation(
+    init_perturb = None
+    if gripper_xyz_preset:
+        init_perturb = build_gripper_xyz_preset(
+            str(gripper_xyz_preset),
+            base_seed=int(gripper_xyz_base_seed),
+        )
+    raw_obs = init_single_env(
         cur_env,
-        rotate_deg=agentview_camera_rotate_deg,
-        rotate_axis=agentview_camera_rotate_axis,
+        init_states[episode_idx % init_states.shape[0]],
+        init_perturb=init_perturb,
+        episode_idx=episode_idx,
     )
-    if agentview_camera_rotate_deg is not None and agentview_camera_rotate_deg != 0:
+    if random_camera_pos_sigma is not None:
+        cam_perturb = RandomCameraViewPerturbation(
+            pos_sigma=float(random_camera_pos_sigma),
+            rot_sigma_rad=float(np.radians(float(random_camera_rot_sigma_deg))),
+            fov_sigma=float(random_camera_fov_sigma),
+            base_seed=int(random_camera_base_seed),
+            enforce_visibility=bool(random_camera_enforce_visibility),
+            image_size=128,
+            name_hint="eval_cam_random",
+        )
+        cam_perturb.apply_to_env(cur_env, episode_idx=episode_idx)
         raw_obs, _, _, _ = cur_env.step([0.] * 7)
     full_obs_list = []
     phase_labels = []
-    noise_rng = np.random.default_rng(seed=int(agentview_noise_seed_base) + int(episode_idx))
-    raw_obs = apply_eef_delta_preposition(
-        cur_env,
-        raw_obs,
-        eef_delta=eef_delta,
-        max_steps=eef_preposition_steps,
-        step_size=eef_step_size,
-        tolerance=eef_tolerance,
-        video_obs_list=full_obs_list,
-        phase_labels=phase_labels,
-    )
+    noise_rng = _noise_rng_for_episode(agentview_noise_seed_base, episode_idx)
     first_obs = _extract_obs(raw_obs)
     print(f"Prompt: {prompt}")
     ret = model.infer(dict(reset=True, prompt=prompt))
@@ -445,7 +471,12 @@ def run_one(
     done = False
     first = True
     while cur_env.env.timestep < 800:
-        infer_obs = _apply_agentview_noise_to_obs(first_obs, sigma=agentview_noise_sigma, rng=noise_rng)
+        infer_obs = _apply_agentview_noise_to_obs(
+            first_obs,
+            sigma=agentview_noise_sigma,
+            rng=noise_rng,
+            apply_wrist=noise_apply_wrist,
+        )
         ret = model.infer(dict(obs=infer_obs, prompt=prompt))
         action = ret['action']
 
@@ -463,7 +494,12 @@ def run_one(
                     full_obs_list.append(observes)
                     phase_labels.append("inference")
                     key_frame_list.append(
-                        _apply_agentview_noise_to_obs(observes, sigma=agentview_noise_sigma, rng=noise_rng)
+                        _apply_agentview_noise_to_obs(
+                            observes,
+                            sigma=agentview_noise_sigma,
+                            rng=noise_rng,
+                            apply_wrist=noise_apply_wrist,
+                        )
                     )
 
             if done:
@@ -498,14 +534,16 @@ def run(
     test_num,
     task_range=None,
     prompt=None,
-    eef_delta=None,
-    eef_preposition_steps=80,
-    eef_step_size=0.01,
-    eef_tolerance=0.01,
-    agentview_camera_rotate_deg=None,
-    agentview_camera_rotate_axis="z",
     agentview_noise_sigma=None,
     agentview_noise_seed_base=0,
+    noise_apply_wrist=True,
+    random_camera_pos_sigma=None,
+    random_camera_rot_sigma_deg=8.0,
+    random_camera_fov_sigma=5.0,
+    random_camera_base_seed=42,
+    random_camera_enforce_visibility=True,
+    gripper_xyz_preset=None,
+    gripper_xyz_base_seed=42,
     resume=False,
 ):
     '''
@@ -555,14 +593,16 @@ def run(
                 out_dir,
                 episode_idx,
                 prompt,
-                eef_delta=eef_delta,
-                eef_preposition_steps=eef_preposition_steps,
-                eef_step_size=eef_step_size,
-                eef_tolerance=eef_tolerance,
-                agentview_camera_rotate_deg=agentview_camera_rotate_deg,
-                agentview_camera_rotate_axis=agentview_camera_rotate_axis,
                 agentview_noise_sigma=agentview_noise_sigma,
                 agentview_noise_seed_base=agentview_noise_seed_base,
+                noise_apply_wrist=noise_apply_wrist,
+                random_camera_pos_sigma=random_camera_pos_sigma,
+                random_camera_rot_sigma_deg=random_camera_rot_sigma_deg,
+                random_camera_fov_sigma=random_camera_fov_sigma,
+                random_camera_base_seed=random_camera_base_seed,
+                random_camera_enforce_visibility=random_camera_enforce_visibility,
+                gripper_xyz_preset=gripper_xyz_preset,
+                gripper_xyz_base_seed=gripper_xyz_base_seed,
             )
             succ_num += res_i
             completed_num += 1
@@ -631,45 +671,6 @@ def main():
         help="Custom prompt for the task (overrides benchmark prompt)",
     )
     parser.add_argument(
-        "--eef-delta",
-        type=float,
-        nargs=3,
-        default=None,
-        metavar=("DX", "DY", "DZ"),
-        help="Move the end-effector by this xyz delta before the first policy inference.",
-    )
-    parser.add_argument(
-        "--eef-preposition-steps",
-        type=int,
-        default=120,
-        help="Maximum number of environment steps used to move the end-effector before inference.",
-    )
-    parser.add_argument(
-        "--eef-step-size",
-        type=float,
-        default=1.0,
-        help="Maximum end-effector xyz motion per preposition step, in meters.",
-    )
-    parser.add_argument(
-        "--eef-tolerance",
-        type=float,
-        default=0.01,
-        help="Stop prepositioning when the end-effector is within this distance of the target, in meters.",
-    )
-    parser.add_argument(
-        "--agentview-camera-rotate-deg",
-        type=float,
-        default=None,
-        help="Orbit the LIBERO third-person agentview camera around robot/table anchor by this angle in degrees.",
-    )
-    parser.add_argument(
-        "--agentview-camera-rotate-axis",
-        type=str,
-        choices=["x", "y", "z"],
-        default="z",
-        help="World axis used for the orbit defined by --agentview-camera-rotate-deg.",
-    )
-    parser.add_argument(
         "--agentview-noise-sigma",
         type=float,
         default=None,
@@ -682,11 +683,31 @@ def main():
         help="Per-episode gaussian noise seed base.",
     )
     parser.add_argument(
+        "--noise-apply-wrist",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply gaussian noise to the wrist image as well as agentview. Default matches ctrlwam noise_extreme.",
+    )
+    parser.add_argument("--random-camera-pos-sigma", type=float, default=None)
+    parser.add_argument("--random-camera-rot-sigma-deg", type=float, default=8.0)
+    parser.add_argument("--random-camera-fov-sigma", type=float, default=5.0)
+    parser.add_argument("--random-camera-base-seed", type=int, default=42)
+    parser.add_argument("--disable-random-camera-visibility", action="store_true")
+    parser.add_argument(
+        "--gripper-xyz-preset",
+        type=str,
+        default=None,
+        help="ctrlwam gripper XYZ init perturbation preset, e.g. xyz_random_xlarge_3.",
+    )
+    parser.add_argument("--gripper-xyz-base-seed", type=int, default=42)
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Skip existing episode videos in out-dir and continue until --test-num episodes exist.",
     )
     args = parser.parse_args()
+    args.random_camera_enforce_visibility = not bool(args.disable_random_camera_visibility)
+    delattr(args, "disable_random_camera_visibility")
     run(**vars(args))
     print("Finish all process!!!!!!!!!!!!")
 

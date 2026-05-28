@@ -1,10 +1,11 @@
 import json
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from scripts.lqr.lqr_core_ctrlwam import VCache, chained_riccati
+from scripts.lqr.lqr_core_ctrlwam import VCache, chained_riccati_per_chunk
 
 
 class LQRInjector:
@@ -15,6 +16,9 @@ class LQRInjector:
         lambda_scale: float,
         q_scale: float,
         r_scale: float,
+        r_scale_tau: float,
+        r_scale_final: float,
+        max_chunks: int,
         qf_scale: float,
         inject_mode: str = "auto",
         device: Optional[torch.device] = None,
@@ -24,6 +28,9 @@ class LQRInjector:
         self.lambda_scale = float(lambda_scale)
         self.q_scale = float(q_scale)
         self.r_scale = float(r_scale)
+        self.r_scale_tau = float(r_scale_tau)
+        self.r_scale_final = float(r_scale_final)
+        self.max_chunks = int(max_chunks)
         self.qf_scale = float(qf_scale)
         self.device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
         self.inject_mode = str(inject_mode)
@@ -36,6 +43,8 @@ class LQRInjector:
         self.u_step_pending: Optional[Dict[str, torch.Tensor]] = None
         self.u_norm_log: List[Tuple[int, int, float, float]] = []
         self._shape_warned = set()
+        self.rollout_chunk_idx = 0
+        self.active_chunk_idx = 0
 
         cfg = json.loads((self.svd_dir / "config.json").read_text(encoding="utf-8"))
         cfg_mode = str(cfg.get("mode", "action"))
@@ -71,14 +80,29 @@ class LQRInjector:
             if t in self.sel_idx_of and self.sel_idx_of[t] < self.T_diff - 1:
                 B_tilde[self.sel_idx_of[t]] = Bt.float()
 
-        K_intra, K_step = chained_riccati(
+        if self.r_scale_tau <= 0:
+            raise ValueError(f"r_scale_tau must be > 0, got {self.r_scale_tau}")
+        if self.r_scale_final < self.r_scale:
+            raise ValueError(
+                f"r_scale_final ({self.r_scale_final:g}) must be >= r_scale ({self.r_scale:g})"
+            )
+        if self.max_chunks < 1:
+            raise ValueError(f"max_chunks must be >= 1, got {self.max_chunks}")
+        self.r_scale_schedule = [
+            min(self.r_scale_final, self.r_scale * math.exp(c / self.r_scale_tau))
+            for c in range(self.max_chunks)
+        ]
+
+        self.K_intra_per_chunk, self.K_step_per_chunk = chained_riccati_per_chunk(
             A_tilde=A_tilde,
             B_tilde=B_tilde,
             q_scale=self.q_scale,
-            r_scale=self.r_scale,
+            r_scale_schedule=self.r_scale_schedule,
             qf_scale=self.qf_scale,
             device=self.device,
         )
+        K_intra = self.K_intra_per_chunk[0]
+        K_step = self.K_step_per_chunk[0]
         self.lqr = {
             "K_intra": K_intra.to(device=self.device, dtype=torch.float32),
             "K_step": K_step.to(device=self.device, dtype=torch.float32),
@@ -95,8 +119,25 @@ class LQRInjector:
             dtype=torch.bfloat16,
         )
 
+    def reset_rollout(self) -> None:
+        self.rollout_chunk_idx = 0
+        self.active_chunk_idx = 0
+        self.video_step_idx = 0
+        self.action_step_idx = 0
+        self.current_step_idx = -1
+        self.u_step_pending = None
+
+    def _swap_k_for_chunk(self, chunk_idx: int) -> None:
+        c_eff = min(max(int(chunk_idx), 0), self.max_chunks - 1)
+        self.active_chunk_idx = c_eff
+        self.lqr["K_intra"].copy_(self.K_intra_per_chunk[c_eff].to(device=self.device, dtype=torch.float32))
+        if self.K_step_per_chunk.numel() > 0:
+            self.lqr["K_step"].copy_(self.K_step_per_chunk[c_eff].to(device=self.device, dtype=torch.float32))
+
     def on_chunk_start(self, chunk_id: int) -> None:
         del chunk_id
+        self._swap_k_for_chunk(self.rollout_chunk_idx)
+        self.rollout_chunk_idx += 1
         self.video_step_idx = 0
         self.action_step_idx = 0
         self.current_step_idx = -1

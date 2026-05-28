@@ -1,26 +1,5 @@
-variants:
-  - name: nominal
-
-  - name: eef_y_neg_05
-    eef_delta: [0.0, -0.5, 0.0]
-    eef_preposition_steps: 120
-    eef_step_size: 1.0
-    eef_tolerance: 0.01
-
-  - name: eef_y_neg_03
-    eef_delta: [0.0, -0.3, 0.0]
-    eef_preposition_steps: 120
-    eef_step_size: 1.0
-    eef_tolerance: 0.01
-
-  - name: eef_y_pos_03
-    eef_delta: [0.0, 0.3, 0.0]
-    eef_preposition_steps: 120
-    eef_step_size: 1.0
-    eef_tolerance: 0.01
-
-  - name: eef_y_pos_05
-    eef_delta: [0.0, 0.5, 0.0]
-    eef_preposition_steps: 120
-    eef_step_size: 1.0
-    eef_tolerance: 0.01
+perturbation:
+  name: xyz_random_xlarge_3_seed42
+  kind: init_position
+  preset: xyz_random_xlarge_3
+  base_seed: 42

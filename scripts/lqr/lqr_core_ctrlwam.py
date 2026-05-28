@@ -139,3 +139,72 @@ def chained_riccati(
         if t < T_diff - 1:
             K_step[t] = K_chain[t * L + (L - 1)]
     return K_intra, K_step
+
+
+def chained_riccati_per_chunk(
+    A_tilde: torch.Tensor,
+    B_tilde: torch.Tensor,
+    q_scale: float,
+    r_scale_schedule: Iterable[float],
+    qf_scale: float,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Direct ctrlwam-style variant: one Riccati solve per policy chunk, with
+    # the same A/B/Q/Qf and a chunk-dependent scalar R.
+    T_diff, L_minus1, r, _ = A_tilde.shape
+    L = L_minus1 + 1
+    K_total = T_diff * L - 1 if T_diff > 0 else 0
+    r_values = [float(x) for x in r_scale_schedule]
+    n_chunks = len(r_values)
+    if K_total <= 0 or n_chunks <= 0:
+        return (
+            torch.zeros(n_chunks, T_diff, L - 1, r, r, dtype=torch.float32),
+            torch.zeros(n_chunks, max(T_diff - 1, 0), r, r, dtype=torch.float32),
+        )
+
+    _dtype = torch.float64
+    I_r = torch.eye(r, dtype=_dtype, device=device)
+    Q_chain = (float(q_scale) * I_r).expand(K_total, r, r).contiguous()
+    S_T = (float(qf_scale) * I_r).contiguous()
+
+    A_dev = A_tilde.to(device=device, dtype=_dtype)
+    B_dev = B_tilde.to(device=device, dtype=_dtype)
+    A_chain = torch.zeros(K_total, r, r, dtype=_dtype, device=device)
+    for t in range(T_diff):
+        for l in range(L - 1):
+            A_chain[t * L + l] = A_dev[t, l]
+        if t < T_diff - 1 and B_dev.numel() > 0:
+            A_chain[t * L + (L - 1)] = B_dev[t]
+
+    K_intra_per_chunk = torch.zeros(n_chunks, T_diff, L - 1, r, r, dtype=torch.float32)
+    K_step_per_chunk = torch.zeros(n_chunks, max(T_diff - 1, 0), r, r, dtype=torch.float32)
+
+    Tn = A_chain.shape[0]
+    for c, r_scale_c in enumerate(r_values):
+        R_chain = (r_scale_c * I_r).expand(K_total, r, r).contiguous()
+        S = torch.zeros(Tn + 1, r, r, dtype=_dtype, device=device)
+        K = torch.zeros(Tn, r, r, dtype=_dtype, device=device)
+        S[Tn] = S_T
+        for k in reversed(range(Tn)):
+            Ak = A_chain[k]
+            P = S[k + 1] + R_chain[k]
+            F = S[k + 1] @ Ak
+            G = Q_chain[k] + Ak.transpose(-2, -1) @ S[k + 1] @ Ak
+            Kk = torch.linalg.solve(P, F)
+            K[k] = Kk
+            Snew = G - F.transpose(-2, -1) @ Kk
+            S[k] = 0.5 * (Snew + Snew.transpose(-2, -1))
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        K_chain = K.float().cpu()
+        for t in range(T_diff):
+            for l in range(L - 1):
+                K_intra_per_chunk[c, t, l] = K_chain[t * L + l]
+            if t < T_diff - 1:
+                K_step_per_chunk[c, t] = K_chain[t * L + (L - 1)]
+        del R_chain, S, K, K_chain
+
+    del A_chain, Q_chain, A_dev, B_dev, I_r
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return K_intra_per_chunk, K_step_per_chunk

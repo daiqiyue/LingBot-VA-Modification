@@ -1,13 +1,8 @@
-variants:
-  - name: nominal
-  - name: camera_z_pos_15
-    camera_rotate_deg: 15.0
-    camera_axis: z
-
-  - name: camera_z_pos_30
-    camera_rotate_deg: 30.0
-    camera_axis: z
-
-  - name: camera_z_pos_45
-    camera_rotate_deg: 45.0
-    camera_axis: z
+perturbation:
+  name: cam_random_large
+  kind: camera
+  pos_sigma_m: 0.10
+  rot_sigma_deg: 8.0
+  fov_sigma_deg: 5.0
+  base_seed: 42
+  enforce_visibility: true

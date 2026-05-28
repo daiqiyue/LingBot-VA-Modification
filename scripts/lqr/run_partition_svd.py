@@ -10,6 +10,12 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from scripts.lqr.common import (
+    default_partitions_three,
+    layer_to_part_from_partitions,
+    parse_partitions,
+)
+
 
 @dataclass
 class _CallCtx:
@@ -158,6 +164,12 @@ def main() -> None:
     parser.add_argument("--num-samples", type=int, default=16)
     parser.add_argument("--k-target", type=int, default=32)
     parser.add_argument("--p-over", type=int, default=8)
+    parser.add_argument(
+        "--partitions",
+        type=str,
+        default="",
+        help="ctrlwam-style layer groups, e.g. 0-9,10-19,20-29. Empty = auto 3 partitions.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -244,32 +256,56 @@ def main() -> None:
             sampling_steps = int(max(server.job_config.num_inference_steps, server.job_config.action_num_inference_steps))
 
     t_to_idx = {t: i for i, t in enumerate(selected_timesteps)}
-    partitions = [(l, l) for l in range(n_layers)]
-    layer_to_part = list(range(n_layers))
+    partition_spec = args.partitions.strip() or default_partitions_three(n_layers)
+    partitions = parse_partitions(partition_spec, n_layers)
+    layer_to_part = layer_to_part_from_partitions(partitions, n_layers)
     c_means = torch.zeros(n_layers, len(selected_timesteps), args.k_target, dtype=torch.float32)
     projected_diffs: Dict[Tuple[int, int, int], torch.Tensor] = {}
+
+    vk_cache: Dict[Tuple[int, int], torch.Tensor] = {}
+    for p_idx, (l_start, l_end) in enumerate(partitions):
+        for t in selected_timesteps:
+            pooled_rows: List[torch.Tensor] = []
+            for layer in range(l_start, l_end + 1):
+                pooled_rows.extend(diffs[(layer, t)])
+            if not pooled_rows:
+                raise RuntimeError(f"No deltas for partition={p_idx}, t={t}.")
+            x_pool = torch.stack(pooled_rows, dim=0)
+            n_pool, d_pool = x_pool.shape
+            if args.k_target > min(n_pool, d_pool):
+                raise ValueError(
+                    f"k_target={args.k_target} too large for partition={p_idx}, t={t} "
+                    f"with N={n_pool}, D={d_pool}."
+                )
+            mean_pool = x_pool.mean(dim=0)
+            xc_pool = x_pool - mean_pool
+            q = min(args.k_target + args.p_over, min(n_pool, d_pool))
+            _, _, v = torch.pca_lowrank(xc_pool, q=q, center=False)
+            vk = v[:, : args.k_target].contiguous().float()
+            vk_cache[(p_idx, t)] = vk
+            v_path = args.out_dir / f"V_part{p_idx}_layers{l_start}-{l_end}_t{t}_k{args.k_target}.pt"
+            torch.save({"V": vk}, v_path)
+            print(
+                f"[svd] partition {p_idx} layers {l_start}-{l_end} t={t}: "
+                f"pooled_rows={n_pool} saved {v_path.name}"
+            )
 
     for (layer, t), delta_list in diffs.items():
         if not delta_list:
             raise RuntimeError(f"No deltas for layer={layer}, t={t}.")
-        X = torch.stack(delta_list, dim=0)  # [N, D]
-        n, d = X.shape
-        if args.k_target > min(n, d):
-            raise ValueError(
-                f"k_target={args.k_target} too large for (layer={layer}, t={t}) with N={n}, D={d}."
-            )
-        mean = X.mean(dim=0)
-        Xc = X - mean
-        q = min(args.k_target + args.p_over, min(n, d))
-        _, _, V = torch.pca_lowrank(Xc, q=q, center=False)
-        Vk = V[:, : args.k_target].contiguous().float()
-
         p_idx = layer_to_part[layer]
-        v_path = args.out_dir / f"V_part{p_idx}_layers{layer}-{layer}_t{t}_k{args.k_target}.pt"
-        torch.save({"V": Vk}, v_path)
-        c_means[layer, t_to_idx[t]] = (mean @ Vk).float()
+        l_start, l_end = partitions[p_idx]
+        vk = vk_cache[(p_idx, t)]
+        x = torch.stack(delta_list, dim=0)
+        n, d = x.shape
+        if vk.shape[0] != d:
+            raise RuntimeError(
+                f"V/activation dim mismatch at layer={layer}, t={t}: V D={vk.shape[0]} vs delta D={d}"
+            )
+        mean = x.mean(dim=0)
+        c_means[layer, t_to_idx[t]] = (mean @ vk).float()
         for s_idx in range(n):
-            projected_diffs[(s_idx, layer, t)] = (X[s_idx] @ Vk).float().cpu()
+            projected_diffs[(s_idx, layer, t)] = (x[s_idx] @ vk).float().cpu()
 
     cfg = {
         "config_name": args.config_name,
@@ -279,7 +315,8 @@ def main() -> None:
         "sampling_steps": int(sampling_steps),
         "L": int(n_layers),
         "k_target": int(args.k_target),
-        "partitions": partitions,
+        "partitions": [list(p) for p in partitions],
+        "partition_spec": partition_spec,
         "num_samples": int(n_total),
         "input_type": "activation_pairs" if activation_native else "obs_pairs",
     }
