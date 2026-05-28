@@ -10,6 +10,10 @@ from lerobot.datasets.utils import write_json
 import os
 import imageio
 import cv2
+import re
+
+
+_EPISODE_VIDEO_RE = re.compile(r"^(\d+)_(True|False)\.mp4$")
 
 
 def _apply_agentview_noise_to_obs(
@@ -318,8 +322,8 @@ def apply_eef_delta_preposition(
     env_in,
     raw_obs,
     eef_delta=None,
-    max_steps=80,
-    step_size=0.01,
+    max_steps=120,
+    step_size=1.0,
     tolerance=0.01,
     video_obs_list=None,
     phase_labels=None,
@@ -502,6 +506,7 @@ def run(
     agentview_camera_rotate_axis="z",
     agentview_noise_sigma=None,
     agentview_noise_seed_base=0,
+    resume=False,
 ):
     '''
         task_range: [start, end) for splitting tasks
@@ -519,17 +524,28 @@ def run(
     print(f"#################### Use benchmark: {libero_benchmark}, num_tasks: {num_tasks} #############")
     model = WebsocketClientPolicy(port=port)
 
-    video_save_root_dict = None
-
-    episode_list = range(test_num)
     for task_idx in progress_bar:
-        if video_save_root_dict is not None and task_idx in video_save_root_dict:
-            video_save_list = os.listdir(os.path.join(out_dir, libero_benchmark, video_save_root_dict[task_idx]))
-            video_states = [1 for file in video_save_list if file.split('_')[1].split('.')[0] == 'True']
-            succ_num = float(len(video_states))
-            episode_list = range(len(video_save_list), test_num)
-        else:
-            succ_num = 0.
+        benchmark_dict = benchmark.get_benchmark_dict()
+        benchmark_instance = benchmark_dict[libero_benchmark]()
+        task_prompt = benchmark_instance.get_task(task_idx).language
+        if prompt is not None:
+            task_prompt = prompt
+
+        completed = {}
+        if resume:
+            video_dir = Path(out_dir) / libero_benchmark / f"{task_idx}_{task_prompt.replace(' ', '_')}"
+            if video_dir.is_dir():
+                for file_name in os.listdir(video_dir):
+                    match = _EPISODE_VIDEO_RE.match(file_name)
+                    if not match:
+                        continue
+                    ep_idx = int(match.group(1))
+                    if ep_idx < test_num:
+                        completed[ep_idx] = match.group(2) == "True"
+
+        succ_num = float(sum(1 for done in completed.values() if done))
+        completed_num = len(completed)
+        episode_list = [ep_idx for ep_idx in range(test_num) if ep_idx not in completed]
 
         for episode_idx in tqdm(episode_list, total=len(episode_list)):
             res_i = run_one(
@@ -549,13 +565,26 @@ def run(
                 agentview_noise_seed_base=agentview_noise_seed_base,
             )
             succ_num += res_i
-            succ_rate = succ_num / (episode_idx + 1)
-            print(f"Success rate: {succ_rate}, success num: {succ_num}, total num: {episode_idx + 1}")
+            completed_num += 1
+            succ_rate = succ_num / completed_num
+            print(f"Success rate: {succ_rate}, success num: {succ_num}, total num: {completed_num}")
             out_file = Path(out_dir) / f"{libero_benchmark}_{task_idx}.json"
             out_file.parent.mkdir(exist_ok=True, parents=True)
             write_json({
                 "succ_num": succ_num,
-                "total_num": episode_idx + 1.,
+                "total_num": float(completed_num),
+                "succ_rate": succ_rate,
+                }, out_file
+            )
+
+        if resume and not episode_list:
+            succ_rate = succ_num / completed_num if completed_num else 0.0
+            print(f"Success rate: {succ_rate}, success num: {succ_num}, total num: {completed_num}")
+            out_file = Path(out_dir) / f"{libero_benchmark}_{task_idx}.json"
+            out_file.parent.mkdir(exist_ok=True, parents=True)
+            write_json({
+                "succ_num": succ_num,
+                "total_num": float(completed_num),
                 "succ_rate": succ_rate,
                 }, out_file
             )
@@ -612,7 +641,7 @@ def main():
     parser.add_argument(
         "--eef-preposition-steps",
         type=int,
-        default=80,
+        default=120,
         help="Maximum number of environment steps used to move the end-effector before inference.",
     )
     parser.add_argument(
@@ -651,6 +680,11 @@ def main():
         type=int,
         default=0,
         help="Per-episode gaussian noise seed base.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip existing episode videos in out-dir and continue until --test-num episodes exist.",
     )
     args = parser.parse_args()
     run(**vars(args))

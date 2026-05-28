@@ -54,6 +54,8 @@ def _build_server_cmd(args: argparse.Namespace) -> List[str]:
         str(args.qf_scale),
         "--inject-mode",
         str(args.inject_mode),
+        "--save_root",
+        args.save_root,
     ]
     return cmd
 
@@ -74,6 +76,8 @@ def _build_client_cmd(args: argparse.Namespace, out_dir: str, variant: Optional[
         "--out-dir",
         out_dir,
     ]
+    if args.resume:
+        cmd += ["--resume"]
     if args.prompt:
         cmd += ["--prompt", args.prompt]
     if variant:
@@ -141,6 +145,18 @@ def main() -> None:
     parser.add_argument("--inject-mode", type=str, choices=["auto", "action", "video", "both"], default="auto")
     parser.add_argument("--perturb-spec", type=str, default=None)
     parser.add_argument("--out-dir", type=str, required=True)
+    parser.add_argument(
+        "--save-root",
+        dest="save_root",
+        type=str,
+        default="",
+        help="Server debug tensor/video save root. Empty disables VA_Server debug outputs.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip existing episode videos in each variant out-dir and continue until --num-episodes exist.",
+    )
     args = parser.parse_args()
 
     cfg = _load_lqr_config(args.lqr_config)
@@ -197,6 +213,11 @@ def main() -> None:
         "svd_dir": args.svd_dir,
         "jac_dir_act": args.jac_dir_act,
         "perturb_spec": args.perturb_spec,
+        "libero_benchmark": args.libero_benchmark,
+        "task_range": args.task_range,
+        "num_episodes": args.num_episodes,
+        "resume": args.resume,
+        "server_save_root": args.save_root,
         "lqr": {
             "lambda_scale": args.lambda_scale,
             "q_scale": args.q_scale,

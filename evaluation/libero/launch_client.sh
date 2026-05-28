@@ -1,11 +1,12 @@
 START=0
 END=1
 
+PORT="${PORT:-$((29056 + (${SLURM_JOB_ID:-0} % 1000)))}"
 
 CAMERA_ARGS=${CAMERA_ARGS:-}
 PYTHONPATH=. python evaluation/libero/client.py \
     --libero-benchmark libero_10 \
-    --port 29056 \
+    --port "${PORT}" \
     --test-num 10 \
     --task-range $START $END \
     --out-dir outputs/libero/task0_camera_init_pos_0.2 \

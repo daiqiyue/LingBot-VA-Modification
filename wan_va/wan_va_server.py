@@ -43,7 +43,8 @@ class VA_Server:
     def __init__(self, job_config):
         self.cache_name = 'pos'
         self.job_config = job_config
-        self.save_root = job_config.save_root
+        self.save_root = str(job_config.save_root).strip() if job_config.save_root is not None else ""
+        self.save_debug_tensors = bool(self.save_root)
         self.dtype = job_config.param_dtype
         self.device = torch.device(f"cuda:{job_config.local_rank}")
         self.enable_offload = getattr(job_config, 'enable_offload', True)  # offload vae & text_encoder to save vram
@@ -481,8 +482,10 @@ class VA_Server:
             )
 
         self.exp_name = f"{prompt}_{time.strftime('%Y%m%d_%H%M%S')}" if prompt else "default"
-        self.exp_save_root = os.path.join(self.save_root, 'real', self.exp_name)
-        os.makedirs(self.exp_save_root, exist_ok=True)
+        self.exp_save_root = None
+        if self.save_debug_tensors:
+            self.exp_save_root = os.path.join(self.save_root, 'real', self.exp_name)
+            os.makedirs(self.exp_save_root, exist_ok=True)
         torch.cuda.empty_cache()
         if self.vram_debug:
             torch.cuda.reset_peak_memory_stats(self.device)
@@ -618,8 +621,9 @@ class VA_Server:
 
         actions[:, ~self.action_mask] *= 0
 
-        save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
-        save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
+        if self.save_debug_tensors:
+            save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
+            save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
 
         actions = self.postprocess_action(actions)
         torch.cuda.empty_cache()
@@ -634,7 +638,8 @@ class VA_Server:
         if should_log:
             self._log_cuda_mem(f"kv[{self._kv_calls}]:begin frame_st_id={self.frame_st_id}")
         self.transformer.clear_pred_cache(self.cache_name)
-        save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
+        if self.save_debug_tensors:
+            save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
         latent_model_input = self._encode_obs(obs)
         if should_log:
             self._log_cuda_mem(f"kv[{self._kv_calls}]:after_encode_obs")
@@ -743,8 +748,9 @@ class VA_Server:
         if self.enable_offload:
             self.vae = self.vae.to(self.device).to(self.dtype)
         
-        decoded_video = self.decode_one_video(pred_latent, 'np')[0]
-        export_to_video(decoded_video, os.path.join(self.save_root, "demo.mp4"), fps=10)
+        if self.save_debug_tensors:
+            decoded_video = self.decode_one_video(pred_latent, 'np')[0]
+            export_to_video(decoded_video, os.path.join(self.save_root, "demo.mp4"), fps=10)
 
 def run(args):    
     

@@ -1,6 +1,7 @@
 import argparse
 import copy
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -102,6 +103,7 @@ def _build_server(config_name: str):
     if not dist.is_initialized():
         init_distributed(world_size=1, local_rank=0, rank=0)
     cfg = copy.deepcopy(VA_CONFIGS[config_name])
+    cfg.save_root = os.environ.get("LQR_SERVER_SAVE_ROOT", "")
     cfg.rank = 0
     cfg.local_rank = 0
     cfg.world_size = 1
