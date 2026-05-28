@@ -154,7 +154,17 @@ else
       --out-dir "${PAIRS_DIR}"
     )
     echo "[1/5] collect positive/negative observations"
+    set +e
     "${COLLECT_CMD[@]}"
+    status=$?
+    set -e
+    if [[ "${status}" -ne 0 ]]; then
+      if [[ -f "${PAIRS_DIR}/positive.npz" && -f "${PAIRS_DIR}/negative.npz" ]]; then
+        echo "[1/5] warning: collect exited with status ${status}, but positive.npz/negative.npz exist; continuing with checkpointed outputs"
+      else
+        exit "${status}"
+      fi
+    fi
   fi
 fi
 
@@ -216,7 +226,7 @@ fi
 "${SVD_CMD[@]}"
 fi
 
-echo "[4/5] compute projected jacobians (ctrlwam-aligned VJP)"
+echo "[4/5] compute projected jacobians - ctrlwam-aligned VJP"
 if [[ -z "${FORCE_STEP4:-}" && -f "${SVD_DIR}/${JAC_SUBDIR}/A_tilde__full.pt" ]]; then
   echo "[4/5] skip jacobian, existing artifact found: ${SVD_DIR}/${JAC_SUBDIR}/A_tilde__full.pt"
 else
@@ -265,6 +275,9 @@ else
   fi
   if [[ -n "${RANDOM_CAMERA_BASE_SEED}" ]]; then
     EVAL_CMD+=(--random-camera-base-seed "${RANDOM_CAMERA_BASE_SEED}")
+  fi
+  if [[ "${RESUME_EVAL:-0}" == "1" ]]; then
+    EVAL_CMD+=(--resume)
   fi
   echo "[5/5] run lqr eval"
   "${EVAL_CMD[@]}"

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 import signal
 import socket
 import subprocess
@@ -16,6 +17,7 @@ _INIT_POS_KINDS = frozenset(
 )
 _GAUSSIAN_KINDS = frozenset({"gaussian", "image_gaussian_noise", "noise"})
 _CAMERA_KINDS = frozenset({"camera", "camera_view", "random_camera"})
+_EPISODE_VIDEO_RE = re.compile(r"^(\d+)_(True|False)\.mp4$")
 
 
 def wait_for_port(host: str, port: int, timeout_sec: int) -> bool:
@@ -193,3 +195,130 @@ def collect_task_metrics(
         succ_rates.append(float(data.get("succ_rate", 0.0)))
     avg = float(sum(succ_rates) / len(succ_rates)) if succ_rates else 0.0
     return {"tasks": rows, "avg_succ_rate": avg}
+
+
+def eval_outputs_complete(
+    out_dir: str,
+    benchmark_name: str,
+    task_range: List[int],
+    num_episodes: int,
+) -> bool:
+    for task_id in range(task_range[0], task_range[1]):
+        fp = Path(out_dir) / f"{benchmark_name}_{task_id}.json"
+        if not fp.exists():
+            return False
+        data = json.loads(fp.read_text(encoding="utf-8"))
+        if float(data.get("total_num", 0.0)) < float(num_episodes):
+            return False
+    return True
+
+
+def _completed_episode_count(
+    out_dir: str,
+    benchmark_name: str,
+    task_range: List[int],
+) -> float:
+    total = 0.0
+    for task_id in range(task_range[0], task_range[1]):
+        task_total = 0.0
+        fp = Path(out_dir) / f"{benchmark_name}_{task_id}.json"
+        if fp.exists():
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            task_total = max(task_total, float(data.get("total_num", 0.0)))
+
+        benchmark_dir = Path(out_dir) / benchmark_name
+        if benchmark_dir.is_dir():
+            seen = set()
+            for task_dir in benchmark_dir.glob(f"{task_id}_*"):
+                if not task_dir.is_dir():
+                    continue
+                for video in task_dir.iterdir():
+                    match = _EPISODE_VIDEO_RE.match(video.name)
+                    if match:
+                        seen.add(int(match.group(1)))
+            task_total = max(task_total, float(len(seen)))
+        total += task_total
+    return total
+
+
+def _with_resume_batch(cmd: List[str], batch_size: int) -> List[str]:
+    out = list(cmd)
+    if "--resume" not in out:
+        out.append("--resume")
+    if "--max-new-episodes" not in out:
+        out += ["--max-new-episodes", str(int(batch_size))]
+    return out
+
+
+def run_client_or_accept_complete(
+    cmd: List[str],
+    env: Dict[str, str],
+    out_dir: str,
+    benchmark_name: str,
+    task_range: List[int],
+    num_episodes: int,
+    log_prefix: str,
+    episode_batch_size: int = 0,
+) -> None:
+    if episode_batch_size and int(episode_batch_size) > 0:
+        batched_cmd = _with_resume_batch(cmd, int(episode_batch_size))
+        failures_without_progress = 0
+        while not eval_outputs_complete(out_dir, benchmark_name, task_range, num_episodes):
+            before = _completed_episode_count(out_dir, benchmark_name, task_range)
+            try:
+                subprocess.run(batched_cmd, check=True, env=env)
+            except subprocess.CalledProcessError as exc:
+                after = _completed_episode_count(out_dir, benchmark_name, task_range)
+                if exc.returncode == -signal.SIGABRT and after > before:
+                    failures_without_progress = 0
+                    print(
+                        f"[{log_prefix}] warning: client SIGABRT after progress "
+                        f"({before:g} -> {after:g}); continuing."
+                    )
+                    continue
+                if exc.returncode == -signal.SIGABRT and eval_outputs_complete(
+                    out_dir,
+                    benchmark_name,
+                    task_range,
+                    num_episodes,
+                ):
+                    print(
+                        f"[{log_prefix}] warning: client exited with SIGABRT after "
+                        "writing complete eval outputs; continuing."
+                    )
+                    return
+                failures_without_progress += 1
+                if failures_without_progress >= 2:
+                    raise
+                print(
+                    f"[{log_prefix}] warning: client SIGABRT without JSON progress; "
+                    "retrying once."
+                )
+                continue
+            after = _completed_episode_count(out_dir, benchmark_name, task_range)
+            if after <= before and not eval_outputs_complete(
+                out_dir,
+                benchmark_name,
+                task_range,
+                num_episodes,
+            ):
+                raise RuntimeError(
+                    f"{log_prefix} client made no progress: completed {after:g}/{num_episodes}"
+                )
+        return
+
+    try:
+        subprocess.run(cmd, check=True, env=env)
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == -signal.SIGABRT and eval_outputs_complete(
+            out_dir,
+            benchmark_name,
+            task_range,
+            num_episodes,
+        ):
+            print(
+                f"[{log_prefix}] warning: client exited with SIGABRT after "
+                "writing complete eval outputs; continuing."
+            )
+            return
+        raise

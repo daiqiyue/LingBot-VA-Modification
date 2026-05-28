@@ -279,6 +279,72 @@ def _write_paired_outputs(
     return float(np.max(np.abs(pos["proprios"] - neg["proprios"])))
 
 
+def _write_init_outputs(
+    out_dir: Path,
+    prompt: str,
+    pos_rows: List[Dict[str, np.ndarray]],
+    neg_rows: List[Dict[str, np.ndarray]],
+    summaries: List[Dict[str, Any]],
+) -> Optional[Dict[str, int]]:
+    if not pos_rows and not neg_rows:
+        return None
+
+    pos_ep_idx, pos_inf_idx, neg_ep_idx, neg_inf_idx = [], [], [], []
+    for row in summaries:
+        ep = int(row["episode"])
+        n_inf = int(row["n_inferences"])
+        if bool(row.get("success", False)):
+            pos_ep_idx.extend([ep] * n_inf)
+            pos_inf_idx.extend(range(n_inf))
+        else:
+            neg_ep_idx.extend([ep] * n_inf)
+            neg_inf_idx.extend(range(n_inf))
+
+    pos_ep_arr = np.asarray(pos_ep_idx, dtype=np.int32)
+    pos_inf_arr = np.asarray(pos_inf_idx, dtype=np.int32)
+    neg_ep_arr = np.asarray(neg_ep_idx, dtype=np.int32)
+    neg_inf_arr = np.asarray(neg_inf_idx, dtype=np.int32)
+    if pos_rows:
+        pos = _stack(pos_rows)
+        np.savez_compressed(
+            out_dir / "positive.npz",
+            **pos,
+            episode_idx=pos_ep_arr,
+            inference_idx=pos_inf_arr,
+            drive_source=np.zeros_like(pos_ep_arr, dtype=np.int32),
+            config_idx=np.zeros_like(pos_ep_arr, dtype=np.int32),
+            success=np.ones_like(pos_ep_arr, dtype=np.int32),
+        )
+    if neg_rows:
+        neg = _stack(neg_rows)
+        np.savez_compressed(
+            out_dir / "negative.npz",
+            **neg,
+            episode_idx=neg_ep_arr,
+            inference_idx=neg_inf_arr,
+            drive_source=np.zeros_like(neg_ep_arr, dtype=np.int32),
+            config_idx=np.zeros_like(neg_ep_arr, dtype=np.int32),
+            success=np.zeros_like(neg_ep_arr, dtype=np.int32),
+        )
+    (out_dir / "prompt.txt").write_text(prompt + "\n", encoding="utf-8")
+    (out_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "mode": "paired_obs_fixed_prompt",
+                "checkpoint": True,
+                "task_language": prompt,
+                "prompt": prompt,
+                "positive_rows": int(len(pos_rows)),
+                "negative_rows": int(len(neg_rows)),
+                "rollouts": summaries,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {"positive_rows": int(len(pos_rows)), "negative_rows": int(len(neg_rows))}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Collect ctrlwam-style paired LingBot LIBERO observations for LQR.")
     parser.add_argument("--config-name", type=str, default="libero")
@@ -380,6 +446,7 @@ def main():
             print(f"[collect-pairs] checkpoint rows={len(ep_idx)} paired_proprio_max_abs_diff={max_dproprio:.3e}", flush=True)
     elif is_init:
         for ep in range(min(n_pos, max_ep)):
+            print(f"[collect-pairs] init-position perturbed episode {ep + 1}/{min(n_pos, max_ep)}", flush=True)
             success, records = _record_drive(
                 server,
                 env_neg,
@@ -406,6 +473,19 @@ def main():
                     "perturb_sample": getattr(perturb, "_last_sample", {}),
                 }
             )
+            checkpoint = _write_init_outputs(args.out_dir, prompt, pos_rows, neg_rows, summaries)
+            if checkpoint is None:
+                print(
+                    f"[collect-pairs] checkpoint waiting for both success/failure buckets: "
+                    f"positive_rows={len(pos_rows)} negative_rows={len(neg_rows)}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[collect-pairs] checkpoint positive_rows={checkpoint['positive_rows']} "
+                    f"negative_rows={checkpoint['negative_rows']}",
+                    flush=True,
+                )
     else:
         raise ValueError("nominal perturbation does not produce contrastive pairs")
 

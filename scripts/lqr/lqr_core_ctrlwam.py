@@ -7,20 +7,31 @@ import torch
 
 
 def _solve_with_jitter(P: torch.Tensor, F: torch.Tensor) -> torch.Tensor:
-    solution, info = torch.linalg.solve_ex(P, F)
-    if int(info.max().item()) == 0 and torch.isfinite(solution).all():
-        return solution
-
     n = P.shape[-1]
-    eye = torch.eye(n, dtype=P.dtype, device=P.device)
-    scale = torch.linalg.matrix_norm(P.detach(), ord=float("inf")).clamp_min(1.0)
-    for eps in (1e-8, 1e-7, 1e-6, 1e-5, 1e-4):
-        P_reg = P + (eps * scale) * eye
-        solution, info = torch.linalg.solve_ex(P_reg, F)
+    P_work = 0.5 * (P + P.transpose(-2, -1))
+    P_work = torch.nan_to_num(P_work, nan=0.0, posinf=1e12, neginf=-1e12)
+    F_work = torch.nan_to_num(F, nan=0.0, posinf=1e12, neginf=-1e12)
+    eye = torch.eye(n, dtype=P_work.dtype, device=P_work.device)
+    scale = torch.linalg.matrix_norm(P_work.detach(), ord=float("inf"))
+    if not torch.isfinite(scale):
+        scale = torch.ones((), dtype=P_work.dtype, device=P_work.device)
+    scale = scale.clamp_min(1.0)
+
+    for eps in (0.0, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0):
+        P_reg = P_work + (eps * scale) * eye
+        solution, info = torch.linalg.solve_ex(P_reg, F_work)
         if int(info.max().item()) == 0 and torch.isfinite(solution).all():
             return solution
 
-    return torch.linalg.pinv(P) @ F
+    # If the local linearization is too ill-conditioned even after heavy
+    # regularization, skip this local LQR correction instead of aborting eval.
+    return torch.zeros_like(F_work)
+
+
+def _finite_symmetric(mat: torch.Tensor) -> torch.Tensor:
+    mat = torch.nan_to_num(mat, nan=0.0, posinf=1e12, neginf=-1e12)
+    mat = mat.clamp(min=-1e12, max=1e12)
+    return 0.5 * (mat + mat.transpose(-2, -1))
 
 
 class VCache:
@@ -141,9 +152,10 @@ def chained_riccati(
         F = S[k + 1] @ Ak
         G = Q_chain[k] + Ak.transpose(-2, -1) @ S[k + 1] @ Ak
         Kk = _solve_with_jitter(P, F)
+        Kk = torch.nan_to_num(Kk, nan=0.0, posinf=1e6, neginf=-1e6).clamp(min=-1e6, max=1e6)
         K[k] = Kk
         Snew = G - F.transpose(-2, -1) @ Kk
-        S[k] = 0.5 * (Snew + Snew.transpose(-2, -1))
+        S[k] = _finite_symmetric(Snew)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
 
@@ -208,9 +220,10 @@ def chained_riccati_per_chunk(
             F = S[k + 1] @ Ak
             G = Q_chain[k] + Ak.transpose(-2, -1) @ S[k + 1] @ Ak
             Kk = _solve_with_jitter(P, F)
+            Kk = torch.nan_to_num(Kk, nan=0.0, posinf=1e6, neginf=-1e6).clamp(min=-1e6, max=1e6)
             K[k] = Kk
             Snew = G - F.transpose(-2, -1) @ Kk
-            S[k] = 0.5 * (Snew + Snew.transpose(-2, -1))
+            S[k] = _finite_symmetric(Snew)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         K_chain = K.float().cpu()

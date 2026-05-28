@@ -14,6 +14,7 @@ from scripts.lqr.libero_eval_common import (
     collect_task_metrics,
     load_eval_variants,
     resolve_task_ranges,
+    run_client_or_accept_complete,
     stop_process,
     wait_for_port,
 )
@@ -100,6 +101,12 @@ def main() -> None:
         action="store_true",
         help="Skip existing episode videos in each variant out-dir and continue until --num-episodes exist.",
     )
+    parser.add_argument(
+        "--client-episode-batch-size",
+        type=int,
+        default=1,
+        help="Run the eval client in small resume batches to isolate native EGL/SIGABRT failures. Use 0 for one long client run.",
+    )
     args = parser.parse_args()
     if args.task_ids:
         task_ranges = resolve_task_ranges([], args.task_ids)
@@ -151,7 +158,16 @@ def main() -> None:
                     f"[policy-eval] perturbed({name}) tasks=[{task_range[0]},{task_range[1]}) "
                     f"client: {' '.join(client_cmd)}"
                 )
-                subprocess.run(client_cmd, check=True, env=env)
+                run_client_or_accept_complete(
+                    client_cmd,
+                    env,
+                    out_i,
+                    args.libero_benchmark,
+                    task_range,
+                    args.num_episodes,
+                    "policy-eval",
+                    args.client_episode_batch_size,
+                )
                 task_metrics[str(task_range[0])] = collect_task_metrics(
                     out_i, args.libero_benchmark, task_range
                 )

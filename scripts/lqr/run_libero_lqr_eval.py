@@ -11,6 +11,8 @@ from scripts.lqr.libero_eval_common import (
     build_client_cmd,
     collect_task_metrics,
     load_eval_variants,
+    resolve_task_ranges,
+    run_client_or_accept_complete,
     stop_process,
     wait_for_port,
 )
@@ -56,11 +58,34 @@ def _load_lqr_config(path: Optional[str]) -> Dict[str, Any]:
     return maybe_load_yaml(path)
 
 
+def _collect_task_metrics_for_ranges(
+    out_dir: str,
+    benchmark_name: str,
+    task_ranges: List[List[int]],
+) -> Dict[str, Any]:
+    rows: Dict[str, Any] = {}
+    succ_rates: List[float] = []
+    for task_range in task_ranges:
+        metrics = collect_task_metrics(out_dir, benchmark_name, task_range)
+        for task_id, data in metrics["tasks"].items():
+            rows[task_id] = data
+            succ_rates.append(float(data.get("succ_rate", 0.0)))
+    avg = float(sum(succ_rates) / len(succ_rates)) if succ_rates else 0.0
+    return {"tasks": rows, "avg_succ_rate": avg}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run LIBERO evaluation with LQR-steered server.")
     parser.add_argument("--config-name", type=str, default="libero")
     parser.add_argument("--libero-benchmark", type=str, default="libero_10")
     parser.add_argument("--task-range", type=int, nargs=2, default=[0, 1])
+    parser.add_argument(
+        "--task-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Explicit LIBERO task ids (e.g. 1 2 7 9). Overrides --task-range.",
+    )
     parser.add_argument("--num-episodes", type=int, default=20)
     parser.add_argument("--prompt", type=str, default=None)
     parser.add_argument("--port", type=int, default=None)
@@ -114,7 +139,14 @@ def main() -> None:
         action="store_true",
         help="Skip existing episode videos in each variant out-dir and continue until --num-episodes exist.",
     )
+    parser.add_argument(
+        "--client-episode-batch-size",
+        type=int,
+        default=1,
+        help="Run the eval client in small resume batches to isolate native EGL/SIGABRT failures. Use 0 for one long client run.",
+    )
     args = parser.parse_args()
+    task_ranges = resolve_task_ranges(args.task_range, args.task_ids)
 
     if args.port is None:
         args.port = default_slurm_port()
@@ -170,10 +202,23 @@ def main() -> None:
         for variant in variants:
             name = str(variant.get("name", "variant"))
             out_i = ensure_dir(os.path.join(perturbed_root, name))
-            pert_cmd = build_client_cmd(args, out_dir=out_i, variant=variant)
-            print(f"[eval] perturbed({name}) client: {' '.join(pert_cmd)}")
-            subprocess.run(pert_cmd, check=True, env=env)
-            variant_metrics[name] = collect_task_metrics(out_i, args.libero_benchmark, args.task_range)
+            for task_range in task_ranges:
+                args.task_range = task_range
+                pert_cmd = build_client_cmd(args, out_dir=out_i, variant=variant)
+                print(f"[eval] perturbed({name}) client: {' '.join(pert_cmd)}")
+                run_client_or_accept_complete(
+                    pert_cmd,
+                    env,
+                    out_i,
+                    args.libero_benchmark,
+                    args.task_range,
+                    args.num_episodes,
+                    "eval",
+                    args.client_episode_batch_size,
+                )
+            variant_metrics[name] = _collect_task_metrics_for_ranges(
+                out_i, args.libero_benchmark, task_ranges
+            )
     finally:
         stop_process(server_proc)
 
@@ -189,7 +234,9 @@ def main() -> None:
         "gripper_xyz_base_seed": args.gripper_xyz_base_seed,
         "random_camera_base_seed": args.random_camera_base_seed,
         "libero_benchmark": args.libero_benchmark,
-        "task_range": args.task_range,
+        "task_range": None if args.task_ids else args.task_range,
+        "task_ids": args.task_ids,
+        "task_ranges": task_ranges,
         "num_episodes": args.num_episodes,
         "resume": args.resume,
         "server_save_root": args.save_root,

@@ -152,21 +152,27 @@ if should_run_step 4; then
     echo "[4/4] skipped eval (SUBMIT_EVAL=${SUBMIT_EVAL})"
   else
     echo "[4/4] run camera-perturbed LQR eval with ctrlwam sweep seed ${EVAL_CAM_BASE_SEED}"
-    python scripts/lqr/run_libero_lqr_eval.py \
-      --config-name "${CONFIG_NAME}" \
-      --libero-benchmark "${LIBERO_BENCHMARK}" \
-      --task-range "${TASK_RANGE_START}" "${TASK_RANGE_END}" \
-      --num-episodes "${EVAL_NUM_EPISODES}" \
-      --startup-wait-sec "${EVAL_STARTUP_WAIT_SEC}" \
-      --port "${PORT}" \
-      --svd-dir "${SVD_DIR}" \
-      --jac-dir-act "${JAC_SUBDIR}" \
-      --lqr-config "${LQR_CONFIG}" \
-      --inject-mode "${INJECT_MODE}" \
-      --perturb-spec "${PERTURB_SPEC}" \
-      --random-camera-base-seed "${EVAL_CAM_BASE_SEED}" \
-      --prompt "${PROMPT}" \
+    EVAL_CMD=(
+      python scripts/lqr/run_libero_lqr_eval.py
+      --config-name "${CONFIG_NAME}"
+      --libero-benchmark "${LIBERO_BENCHMARK}"
+      --task-range "${TASK_RANGE_START}" "${TASK_RANGE_END}"
+      --num-episodes "${EVAL_NUM_EPISODES}"
+      --startup-wait-sec "${EVAL_STARTUP_WAIT_SEC}"
+      --port "${PORT}"
+      --svd-dir "${SVD_DIR}"
+      --jac-dir-act "${JAC_SUBDIR}"
+      --lqr-config "${LQR_CONFIG}"
+      --inject-mode "${INJECT_MODE}"
+      --perturb-spec "${PERTURB_SPEC}"
+      --random-camera-base-seed "${EVAL_CAM_BASE_SEED}"
+      --prompt "${PROMPT}"
       --out-dir "${EVAL_OUT_BASE}"
+    )
+    if [[ "${RESUME_EVAL:-0}" == "1" ]]; then
+      EVAL_CMD+=(--resume)
+    fi
+    "${EVAL_CMD[@]}"
   fi
 fi
 
