@@ -211,6 +211,9 @@ def main() -> None:
 
     in_manifest_path = in_dir / "manifest.json"
     in_manifest = json.loads(in_manifest_path.read_text(encoding="utf-8")) if in_manifest_path.exists() else None
+    task_prompt = None
+    if isinstance(in_manifest, dict):
+        task_prompt = in_manifest.get("task_language") or in_manifest.get("prompt")
     manifest = {
         "in_dir": str(in_dir),
         "feature": args.feature,
@@ -235,6 +238,9 @@ def main() -> None:
         ),
         "input_manifest": in_manifest,
     }
+    if task_prompt:
+        manifest["task_language"] = str(task_prompt)
+        manifest["prompt"] = str(task_prompt)
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     _log(
         "final pairs=%d distance min=%.4f median=%.4f mean=%.4f max=%.4f"

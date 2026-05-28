@@ -122,6 +122,55 @@ def _parse_int_csv(value: str) -> List[int]:
     return [int(x.strip()) for x in value.split(",") if x.strip()]
 
 
+def _resolve_num_samples(num_samples: int, n_pos: int, n_neg: int) -> int:
+    """<=0 means use all available paired rows (ctrlwam N=-1 convention)."""
+    n_avail = min(int(n_pos), int(n_neg))
+    if int(num_samples) <= 0:
+        return n_avail
+    return min(int(num_samples), n_avail)
+
+
+def _prompt_from_manifest(manifest: Dict) -> Optional[str]:
+    for key in ("task_language", "prompt"):
+        value = manifest.get(key)
+        if value:
+            return str(value).strip()
+    nested = manifest.get("input_manifest")
+    if isinstance(nested, dict):
+        for key in ("task_language", "prompt"):
+            value = nested.get(key)
+            if value:
+                return str(value).strip()
+    return None
+
+
+def _load_prompt_from_pairs_dir(pairs_dir: Path, cli_prompt: Optional[str]) -> str:
+    if cli_prompt and str(cli_prompt).strip():
+        return str(cli_prompt).strip()
+
+    manifest_path = pairs_dir / "manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        prompt = _prompt_from_manifest(manifest)
+        if prompt:
+            return prompt
+        in_dir = manifest.get("in_dir")
+        if in_dir:
+            parent_prompt = _load_prompt_from_pairs_dir(Path(str(in_dir)), None)
+            if parent_prompt:
+                return parent_prompt
+
+    prompt_path = pairs_dir / "prompt.txt"
+    if prompt_path.is_file():
+        text = prompt_path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+
+    raise ValueError(
+        f"Prompt is required for SVD. Pass --prompt or provide manifest/prompt.txt under {pairs_dir}."
+    )
+
+
 def _collect_diffs_from_activation_pairs(
     pos_payload: Dict,
     neg_payload: Dict,
@@ -129,7 +178,7 @@ def _collect_diffs_from_activation_pairs(
 ) -> Tuple[Dict[Tuple[int, int], List[torch.Tensor]], str, List[int], List[int], int]:
     pos_records = list(pos_payload.get("records", []))
     neg_records = list(neg_payload.get("records", []))
-    n_total = min(int(num_samples), len(pos_records), len(neg_records))
+    n_total = _resolve_num_samples(num_samples, len(pos_records), len(neg_records))
     if n_total <= 0:
         raise ValueError("No activation pairs available for SVD.")
 
@@ -161,7 +210,7 @@ def main() -> None:
     parser.add_argument("--mode", type=str, choices=["video", "action", "both"], default="action")
     parser.add_argument("--layers", type=str, default="", help="Comma separated layer ids; empty means all layers.")
     parser.add_argument("--selected-timesteps", type=str, default="0,10,20,30,40")
-    parser.add_argument("--num-samples", type=int, default=16)
+    parser.add_argument("--num-samples", type=int, default=16, help="Rows for SVD; <=0 uses all paired rows.")
     parser.add_argument("--k-target", type=int, default=32)
     parser.add_argument("--p-over", type=int, default=8)
     parser.add_argument(
@@ -198,13 +247,8 @@ def main() -> None:
             raise FileNotFoundError(f"Expected positive/negative pair files in {args.pairs_dir}")
         pos = np.load(pos_path)
         neg = np.load(neg_path)
-        manifest_path = args.pairs_dir / "manifest.json"
-        prompt = args.prompt
-        if prompt is None and manifest_path.exists():
-            pair_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            prompt = pair_manifest.get("task_language") or pair_manifest.get("prompt")
-        if not prompt:
-            raise ValueError("Prompt is required. Pass --prompt or provide manifest with task_language/prompt.")
+        prompt = _load_prompt_from_pairs_dir(args.pairs_dir, args.prompt)
+        print(f"[svd] prompt={prompt!r}")
 
         server = _build_server(args.config_name)
         transformer = server.transformer
@@ -226,7 +270,12 @@ def main() -> None:
 
         transformer.forward = patched_forward
         cam_keys = list(server.job_config.obs_cam_keys)
-        n_total = int(min(args.num_samples, pos["primary_images"].shape[0], neg["primary_images"].shape[0]))
+        n_pos = int(pos["primary_images"].shape[0])
+        n_neg = int(neg["primary_images"].shape[0])
+        n_total = _resolve_num_samples(args.num_samples, n_pos, n_neg)
+        if n_total <= 0:
+            raise ValueError(f"No paired NPZ rows available for SVD under {args.pairs_dir}")
+        print(f"[svd] using {n_total}/{n_pos} paired rows (num_samples={args.num_samples})")
         diffs = {(l, t): [] for l in layers for t in selected_timesteps}
         try:
             for i in range(n_total):

@@ -448,12 +448,20 @@ def main():
         "perturbation": perturb.manifest(),
         "pairing": (
             "Gaussian pairs use clean drives and post-hoc noised negatives. "
-            "Camera pairs use ctrlwam-style same-state replay. Init-position "
+            "Camera pairs use ctrlwam-style two-pass same-state replay: clean "
+            "camera drives positive rollouts and replays states into the "
+            "perturbed-camera env, then perturbed camera drives negative "
+            "rollouts and replays states into the clean env. Init-position "
             "outputs follow ctrlwam task07 semantics: positive.npz contains rows "
             "from successful gripper-perturbed rollouts and negative.npz contains "
             "rows from failed gripper-perturbed rollouts; run "
             "scripts/lqr/pair_inputs_by_similarity.py before SVD."
         ),
+        "requested_rollouts": {
+            "n_pos_rollouts": int(n_pos),
+            "n_neg_rollouts": int(n_neg),
+            "max_episode_index_used": int(max_ep - 1) if max_ep > 0 else -1,
+        },
         "image_layout": "HWC uint8, vertically flipped from LIBERO raw observations",
         "proprio_layout": "concat(robot0_gripper_qpos[2], robot0_eef_pos[3], robot0_eef_quat[4])",
         "total_paired_rows": int(ep_arr.shape[0]),

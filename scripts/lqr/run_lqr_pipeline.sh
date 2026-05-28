@@ -31,15 +31,17 @@ CONFIG_NAME="${CONFIG_NAME:-libero}"
 LIBERO_BENCHMARK="${LIBERO_BENCHMARK:-libero_10}"
 TASK_ID="${TASK_ID:-0}"
 NUM_EPISODES="${NUM_EPISODES:-10}"
+N_POS="${N_POS:-${NUM_EPISODES}}"
+N_NEG="${N_NEG:-${NUM_EPISODES}}"
 SELECTED_TIMESTEPS="${SELECTED_TIMESTEPS:-0,10,20,30,40}"
 COLLECT_MODE="${COLLECT_MODE:-action}"
-PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_init_pos.yaml}"
+PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_camera.yaml}"
 EXISTING_COLLECT_DIR="${EXISTING_COLLECT_DIR:-}"
 EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-}"
 K_TARGET="${K_TARGET:-64}"
 P_OVER="${P_OVER:-10}"
 PARTITIONS="${PARTITIONS:-}"
-NUM_SAMPLES="${NUM_SAMPLES:-200}"
+NUM_SAMPLES="${NUM_SAMPLES:--1}"
 JAC_METHOD="${JAC_METHOD:-vjp}"
 JAC_OBS_INDEX="${JAC_OBS_INDEX:-0}"
 JAC_NUM_SHARDS="${JAC_NUM_SHARDS:-1}"
@@ -74,9 +76,15 @@ EVAL_STARTUP_WAIT_SEC="${EVAL_STARTUP_WAIT_SEC:-1200}"
 INJECT_MODE="${INJECT_MODE:-auto}"
 PROMPT="${PROMPT:-}"
 LQR_CONFIG="${LQR_CONFIG:-scripts/lqr/configs/lqr_config.yaml}"
+AGENTVIEW_NOISE_SEED_BASE="${AGENTVIEW_NOISE_SEED_BASE:-}"
+AGENTVIEW_NOISE_SIGMA="${AGENTVIEW_NOISE_SIGMA:-}"
+RANDOM_CAMERA_BASE_SEED="${RANDOM_CAMERA_BASE_SEED:-}"
 
 echo "===== Lingbot LQR Pipeline ====="
 echo "REPO_ROOT=${REPO_ROOT}"
+echo "TASK_ID=${TASK_ID}"
+echo "N_POS=${N_POS}"
+echo "N_NEG=${N_NEG}"
 echo "PERTURB_SPEC=${PERTURB_SPEC}"
 echo "PERTURB_TAG=${PERTURB_TAG}"
 echo "EXISTING_COLLECT_DIR=${EXISTING_COLLECT_DIR:-<none>}"
@@ -92,6 +100,9 @@ echo "EVAL_OUT_BASE=${EVAL_OUT_BASE}"
 echo "PORT=${PORT} (SLURM_JOB_ID=${SLURM_JOB_ID:-<none>})"
 echo "INJECT_MODE=${INJECT_MODE}"
 echo "EVAL_STARTUP_WAIT_SEC=${EVAL_STARTUP_WAIT_SEC}"
+echo "AGENTVIEW_NOISE_SEED_BASE=${AGENTVIEW_NOISE_SEED_BASE:-<unset>}"
+echo "AGENTVIEW_NOISE_SIGMA=${AGENTVIEW_NOISE_SIGMA:-<unset>}"
+echo "RANDOM_CAMERA_BASE_SEED=${RANDOM_CAMERA_BASE_SEED:-<unset>}"
 echo "TS=${TS}"
 echo "================================"
 
@@ -134,6 +145,8 @@ else
       --libero-benchmark "${LIBERO_BENCHMARK}"
       --task-id "${TASK_ID}"
       --num-episodes "${NUM_EPISODES}"
+      --n-pos-rollouts "${N_POS}"
+      --n-neg-rollouts "${N_NEG}"
       --perturb-spec "${PERTURB_SPEC}"
       --out-dir "${PAIRS_DIR}"
     )
@@ -182,6 +195,9 @@ SVD_CMD=(
 if [[ -n "${PARTITIONS}" ]]; then
   SVD_CMD+=(--partitions "${PARTITIONS}")
 fi
+if [[ -n "${PROMPT}" ]]; then
+  SVD_CMD+=(--prompt "${PROMPT}")
+fi
 "${SVD_CMD[@]}"
 
 echo "[4/5] compute projected jacobians (ctrlwam-aligned VJP)"
@@ -214,6 +230,15 @@ else
   )
   if [[ -n "${PROMPT}" ]]; then
     EVAL_CMD+=(--prompt "${PROMPT}")
+  fi
+  if [[ -n "${AGENTVIEW_NOISE_SEED_BASE}" ]]; then
+    EVAL_CMD+=(--agentview-noise-seed-base "${AGENTVIEW_NOISE_SEED_BASE}")
+  fi
+  if [[ -n "${AGENTVIEW_NOISE_SIGMA}" ]]; then
+    EVAL_CMD+=(--agentview-noise-sigma "${AGENTVIEW_NOISE_SIGMA}")
+  fi
+  if [[ -n "${RANDOM_CAMERA_BASE_SEED}" ]]; then
+    EVAL_CMD+=(--random-camera-base-seed "${RANDOM_CAMERA_BASE_SEED}")
   fi
   echo "[5/5] run lqr eval"
   "${EVAL_CMD[@]}"

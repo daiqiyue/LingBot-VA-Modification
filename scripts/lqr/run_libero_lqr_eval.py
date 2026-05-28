@@ -1,35 +1,19 @@
 import argparse
 import json
 import os
-import signal
-import socket
 import subprocess
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from scripts.lqr.common import ensure_dir, default_slurm_port, maybe_load_yaml
-
-
-def _wait_for_port(host: str, port: int, timeout_sec: int) -> bool:
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return True
-        except OSError:
-            time.sleep(1.0)
-    return False
-
-
-def _stop_process(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    proc.send_signal(signal.SIGINT)
-    try:
-        proc.wait(timeout=20)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+from scripts.lqr.common import default_slurm_port, ensure_dir, maybe_load_yaml
+from scripts.lqr.libero_eval_common import (
+    apply_variant_overrides,
+    build_client_cmd,
+    collect_task_metrics,
+    load_eval_variants,
+    stop_process,
+    wait_for_port,
+)
 
 
 def _build_server_cmd(args: argparse.Namespace) -> List[str]:
@@ -66,76 +50,6 @@ def _build_server_cmd(args: argparse.Namespace) -> List[str]:
     return cmd
 
 
-def _build_client_cmd(args: argparse.Namespace, out_dir: str, variant: Optional[Dict[str, Any]]) -> List[str]:
-    cmd = [
-        "python",
-        "evaluation/libero/client.py",
-        "--libero-benchmark",
-        args.libero_benchmark,
-        "--port",
-        str(args.port),
-        "--test-num",
-        str(args.num_episodes),
-        "--task-range",
-        str(args.task_range[0]),
-        str(args.task_range[1]),
-        "--out-dir",
-        out_dir,
-    ]
-    if args.resume:
-        cmd += ["--resume"]
-    if args.prompt:
-        cmd += ["--prompt", args.prompt]
-    if variant:
-        kind = str(variant.get("kind", variant.get("type", ""))).lower()
-        if kind in {"gaussian", "image_gaussian_noise", "noise"}:
-            cmd += ["--agentview-noise-sigma", str(float(variant.get("sigma", 90.0)))]
-            cmd += ["--noise-apply-wrist"]
-        if kind in {"camera", "camera_view", "random_camera"}:
-            cmd += ["--random-camera-pos-sigma", str(float(variant.get("pos_sigma_m", variant.get("pos_sigma", 0.10))))]
-            cmd += ["--random-camera-rot-sigma-deg", str(float(variant.get("rot_sigma_deg", 8.0)))]
-            cmd += ["--random-camera-fov-sigma", str(float(variant.get("fov_sigma_deg", variant.get("fov_sigma", 5.0))))]
-            cmd += ["--random-camera-base-seed", str(int(variant.get("base_seed", 42)))]
-            if not bool(variant.get("enforce_visibility", True)):
-                cmd += ["--disable-random-camera-visibility"]
-        if kind in {"init_position", "gripper_init", "init_pos", "gripper_xyz"}:
-            cmd += ["--gripper-xyz-preset", str(variant.get("preset", variant.get("name", "xyz_random_xlarge_3")))]
-            cmd += ["--gripper-xyz-base-seed", str(int(variant.get("base_seed", 42)))]
-    return cmd
-
-
-def _load_eval_variants(perturb_spec: Optional[str]) -> List[Dict[str, Any]]:
-    if not perturb_spec:
-        return []
-    spec = maybe_load_yaml(perturb_spec)
-    if "perturbation" in spec:
-        perturb = dict(spec["perturbation"])
-        perturb.setdefault("name", perturb.get("kind", "perturbation"))
-        return [perturb]
-    variants = list(spec.get("variants", []))
-    out = [v for v in variants if str(v.get("name", "")) != "nominal"]
-    for v in out:
-        if "kind" not in v:
-            raise ValueError(
-                "Eval perturb specs must use ctrlwam-style variant entries with explicit `kind`."
-            )
-    return out
-
-
-def _collect_task_metrics(out_dir: str, benchmark_name: str, task_range: List[int]) -> Dict[str, Any]:
-    rows = {}
-    succ_rates = []
-    for task_id in range(task_range[0], task_range[1]):
-        fp = Path(out_dir) / f"{benchmark_name}_{task_id}.json"
-        if not fp.exists():
-            continue
-        data = json.loads(fp.read_text(encoding="utf-8"))
-        rows[str(task_id)] = data
-        succ_rates.append(float(data.get("succ_rate", 0.0)))
-    avg = float(sum(succ_rates) / len(succ_rates)) if succ_rates else 0.0
-    return {"tasks": rows, "avg_succ_rate": avg}
-
-
 def _load_lqr_config(path: Optional[str]) -> Dict[str, Any]:
     if not path:
         return {}
@@ -163,6 +77,30 @@ def main() -> None:
     parser.add_argument("--qf-scale", type=float, default=1.0)
     parser.add_argument("--inject-mode", type=str, choices=["auto", "action", "video", "both"], default="auto")
     parser.add_argument("--perturb-spec", type=str, default=None)
+    parser.add_argument(
+        "--agentview-noise-seed-base",
+        type=int,
+        default=None,
+        help="Override noise_seed_base for gaussian variants (ctrlwam eval uses 99).",
+    )
+    parser.add_argument(
+        "--agentview-noise-sigma",
+        type=float,
+        default=None,
+        help="Override sigma for gaussian variants (noise_extreme=90).",
+    )
+    parser.add_argument(
+        "--gripper-xyz-base-seed",
+        type=int,
+        default=None,
+        help="Override base_seed for init_position variants (ctrlwam eval uses 99).",
+    )
+    parser.add_argument(
+        "--random-camera-base-seed",
+        type=int,
+        default=None,
+        help="Override base_seed for camera variants (ctrlwam camera eval sweep uses 99).",
+    )
     parser.add_argument("--out-dir", type=str, required=True)
     parser.add_argument(
         "--save-root",
@@ -202,7 +140,13 @@ def main() -> None:
     if not args.perturb_spec:
         raise ValueError("--perturb-spec is required (nominal eval is skipped; only perturbed variants are run).")
 
-    variants = _load_eval_variants(args.perturb_spec)
+    variants = apply_variant_overrides(
+        load_eval_variants(args.perturb_spec),
+        gripper_xyz_base_seed=args.gripper_xyz_base_seed,
+        agentview_noise_sigma=args.agentview_noise_sigma,
+        agentview_noise_seed_base=args.agentview_noise_seed_base,
+        random_camera_base_seed=args.random_camera_base_seed,
+    )
     if not variants:
         raise ValueError(
             f"No non-nominal variants found in perturb spec: {args.perturb_spec}"
@@ -217,19 +161,19 @@ def main() -> None:
     print(f"[eval] starting lqr server: {' '.join(server_cmd)}")
     server_proc = subprocess.Popen(server_cmd, env=env)
     try:
-        if not _wait_for_port("127.0.0.1", args.port, args.startup_wait_sec):
+        if not wait_for_port("127.0.0.1", args.port, args.startup_wait_sec):
             raise RuntimeError(f"LQR server did not start at port {args.port}")
 
         variant_metrics = {}
         for variant in variants:
             name = str(variant.get("name", "variant"))
             out_i = ensure_dir(os.path.join(perturbed_root, name))
-            pert_cmd = _build_client_cmd(args, out_dir=out_i, variant=variant)
+            pert_cmd = build_client_cmd(args, out_dir=out_i, variant=variant)
             print(f"[eval] perturbed({name}) client: {' '.join(pert_cmd)}")
             subprocess.run(pert_cmd, check=True, env=env)
-            variant_metrics[name] = _collect_task_metrics(out_i, args.libero_benchmark, args.task_range)
+            variant_metrics[name] = collect_task_metrics(out_i, args.libero_benchmark, args.task_range)
     finally:
-        _stop_process(server_proc)
+        stop_process(server_proc)
 
     vals = [v["avg_succ_rate"] for v in variant_metrics.values()]
     avg_variant = float(sum(vals) / len(vals)) if vals else 0.0
@@ -238,6 +182,10 @@ def main() -> None:
         "svd_dir": args.svd_dir,
         "jac_dir_act": args.jac_dir_act,
         "perturb_spec": args.perturb_spec,
+        "agentview_noise_sigma": args.agentview_noise_sigma,
+        "agentview_noise_seed_base": args.agentview_noise_seed_base,
+        "gripper_xyz_base_seed": args.gripper_xyz_base_seed,
+        "random_camera_base_seed": args.random_camera_base_seed,
         "libero_benchmark": args.libero_benchmark,
         "task_range": args.task_range,
         "num_episodes": args.num_episodes,

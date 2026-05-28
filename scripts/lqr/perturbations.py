@@ -154,6 +154,8 @@ class RandomCameraViewPerturbation(StressTest):
     _baseline_quat: Optional[np.ndarray] = field(default=None, init=False, repr=False)
     _baseline_fov: Optional[float] = field(default=None, init=False, repr=False)
     _workspace_corners: Optional[np.ndarray] = field(default=None, init=False, repr=False)
+    _resolved_workspace_center: Optional[Tuple[float, float, float]] = field(default=None, init=False, repr=False)
+    _resolved_workspace_half_extent: Optional[Tuple[float, float, float]] = field(default=None, init=False, repr=False)
     _last_sample: Dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _last_rejection_count: int = field(default=0, init=False, repr=False)
 
@@ -184,6 +186,8 @@ class RandomCameraViewPerturbation(StressTest):
         xy_half = float(visible_half * self.workspace_visible_fraction)
         center = (float(target[0]), float(target[1]), float(self.workspace_table_z + 0.05))
         half = (xy_half, xy_half, 0.08)
+        self._resolved_workspace_center = center
+        self._resolved_workspace_half_extent = half
         cx, cy, cz = center
         hx, hy, hz = half
         self._workspace_corners = np.array(
@@ -239,7 +243,7 @@ class RandomCameraViewPerturbation(StressTest):
         }
 
     def manifest(self):
-        return {
+        out = {
             "kind": "RandomCameraViewPerturbation",
             "slug": self.slug,
             "camera_name": self.camera_name,
@@ -250,7 +254,17 @@ class RandomCameraViewPerturbation(StressTest):
             "fov_sigma_deg": float(self.fov_sigma),
             "base_seed": int(self.base_seed),
             "enforce_visibility": bool(self.enforce_visibility),
+            "workspace_table_z": float(self.workspace_table_z),
+            "workspace_visible_fraction": float(self.workspace_visible_fraction),
+            "visibility_margin_px": int(self.visibility_margin_px),
+            "image_size": int(self.image_size),
+            "max_rejection_attempts": int(self.max_rejection_attempts),
         }
+        if self._resolved_workspace_center is not None:
+            out["resolved_workspace_center"] = [float(v) for v in self._resolved_workspace_center]
+        if self._resolved_workspace_half_extent is not None:
+            out["resolved_workspace_half_extent"] = [float(v) for v in self._resolved_workspace_half_extent]
+        return out
 
 
 @dataclass
@@ -446,11 +460,16 @@ def build_perturbation(spec: Dict[str, Any]) -> StressTest:
     if kind in {"camera", "camera_view", "random_camera"}:
         return RandomCameraViewPerturbation(
             pos_sigma=float(spec.get("pos_sigma", spec.get("pos_sigma_m", 0.10))),
-            rot_sigma_rad=float(np.radians(float(spec.get("rot_sigma_deg", 8.0)))),
+            rot_sigma_rad=float(spec.get("rot_sigma_rad", np.radians(float(spec.get("rot_sigma_deg", 8.0))))),
             fov_sigma=float(spec.get("fov_sigma", spec.get("fov_sigma_deg", 5.0))),
             base_seed=int(spec.get("base_seed", 42)),
+            camera_name=str(spec.get("camera_name", "agentview")),
             enforce_visibility=bool(spec.get("enforce_visibility", True)),
+            workspace_table_z=float(spec.get("workspace_table_z", 0.90)),
+            workspace_visible_fraction=float(spec.get("workspace_visible_fraction", 0.55)),
+            visibility_margin_px=int(spec.get("visibility_margin_px", 8)),
             image_size=int(spec.get("image_size", 128)),
+            max_rejection_attempts=int(spec.get("max_rejection_attempts", 2000)),
             name_hint=str(spec.get("name", "cam_random_large")),
         )
     if kind in {"init_position", "gripper_init", "init_pos", "gripper_xyz"}:
