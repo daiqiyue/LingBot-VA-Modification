@@ -16,6 +16,7 @@ from scripts.lqr.perturbations import RandomCameraViewPerturbation, build_grippe
 
 
 _EPISODE_VIDEO_RE = re.compile(r"^(\d+)_(True|False)\.mp4$")
+_OPEN_ENVS = []
 
 
 def _apply_agentview_noise_to_obs(
@@ -424,6 +425,8 @@ def run_one(
     random_camera_max_rejection_attempts=2000,
     gripper_xyz_preset=None,
     gripper_xyz_base_seed=42,
+    close_env=False,
+    fixed_first_obs=False,
 ):
     benchmark_dict = benchmark.get_benchmark_dict()
     benchmark_instance = benchmark_dict[libero_benchmark]()
@@ -472,18 +475,21 @@ def run_one(
         print(f"Applied camera perturbation: {cam_perturb.manifest()} sample={getattr(cam_perturb, '_last_sample', {})}")
     full_obs_list = []
     phase_labels = []
-    noise_rng = _noise_rng_for_episode(agentview_noise_seed_base, episode_idx)
+    noise_rng_infer = _noise_rng_for_episode(agentview_noise_seed_base, episode_idx)
+    noise_rng_cache = _noise_rng_for_episode(agentview_noise_seed_base + 1000003, episode_idx)
     first_obs = _extract_obs(raw_obs)
+    current_obs = first_obs
     print(f"Prompt: {prompt}")
     ret = model.infer(dict(reset=True, prompt=prompt))
 
     done = False
     first = True
     while cur_env.env.timestep < 800:
+        source_obs = first_obs if fixed_first_obs else current_obs
         infer_obs = _apply_agentview_noise_to_obs(
-            first_obs,
+            source_obs,
             sigma=agentview_noise_sigma,
-            rng=noise_rng,
+            rng=noise_rng_infer,
             apply_wrist=noise_apply_wrist,
         )
         ret = model.infer(dict(obs=infer_obs, prompt=prompt))
@@ -497,13 +503,14 @@ def run_one(
             for j in range(action.shape[2]):
                 ee_action = action[:, i, j]
                 observes, done = env_one_step(cur_env, ee_action)
+                current_obs = observes
                 if done:
                     break
                 if (j+1) % action_per_frame == 0:
                     noisy_obs = _apply_agentview_noise_to_obs(
                         observes,
                         sigma=agentview_noise_sigma,
-                        rng=noise_rng,
+                        rng=noise_rng_cache,
                         apply_wrist=noise_apply_wrist,
                     )
                     full_obs_list.append(noisy_obs)
@@ -531,7 +538,12 @@ def run_one(
         phase_labels=phase_labels,
     )
 
-    cur_env.close()
+    if close_env:
+        cur_env.close()
+    else:
+        # robosuite/EGL cleanup can abort the Python process on some Slurm
+        # nodes. Keep envs alive for the short eval client lifetime instead.
+        _OPEN_ENVS.append(cur_env)
     return done
 
 
@@ -559,6 +571,9 @@ def run(
     gripper_xyz_preset=None,
     gripper_xyz_base_seed=42,
     resume=False,
+    close_envs=False,
+    max_new_episodes=None,
+    fixed_first_obs=False,
 ):
     '''
         task_range: [start, end) for splitting tasks
@@ -598,6 +613,8 @@ def run(
         succ_num = float(sum(1 for done in completed.values() if done))
         completed_num = len(completed)
         episode_list = [ep_idx for ep_idx in range(test_num) if ep_idx not in completed]
+        if max_new_episodes is not None and int(max_new_episodes) > 0:
+            episode_list = episode_list[: int(max_new_episodes)]
 
         for episode_idx in tqdm(episode_list, total=len(episode_list)):
             res_i = run_one(
@@ -623,6 +640,8 @@ def run(
                 random_camera_max_rejection_attempts=random_camera_max_rejection_attempts,
                 gripper_xyz_preset=gripper_xyz_preset,
                 gripper_xyz_base_seed=gripper_xyz_base_seed,
+                close_env=close_envs,
+                fixed_first_obs=fixed_first_obs,
             )
             succ_num += res_i
             completed_num += 1
@@ -730,6 +749,22 @@ def main():
         "--resume",
         action="store_true",
         help="Skip existing episode videos in out-dir and continue until --test-num episodes exist.",
+    )
+    parser.add_argument(
+        "--close-envs",
+        action="store_true",
+        help="Close robosuite envs after each episode. Disabled by default to avoid native EGL aborts.",
+    )
+    parser.add_argument(
+        "--max-new-episodes",
+        type=int,
+        default=None,
+        help="With --resume, run at most this many missing episodes before exiting.",
+    )
+    parser.add_argument(
+        "--fixed-first-obs",
+        action="store_true",
+        help="Use the legacy eval protocol that feeds the initial observation to every main infer chunk.",
     )
     args = parser.parse_args()
     args.random_camera_enforce_visibility = not bool(args.disable_random_camera_visibility)
