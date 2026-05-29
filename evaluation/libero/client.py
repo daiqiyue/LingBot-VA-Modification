@@ -11,12 +11,20 @@ import os
 import imageio
 import cv2
 import re
+import hashlib
 
 from scripts.lqr.perturbations import RandomCameraViewPerturbation, build_gripper_xyz_preset
 
 
 _EPISODE_VIDEO_RE = re.compile(r"^(\d+)_(True|False)\.mp4$")
 _OPEN_ENVS = []
+
+
+def _task_dir_name(task_idx, prompt, max_prompt_chars=64):
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(prompt)).strip("_")
+    slug = slug[:max_prompt_chars].strip("_") or "task"
+    digest = hashlib.sha1(str(prompt).encode("utf-8")).hexdigest()[:8]
+    return f"{int(task_idx)}_{slug}_{digest}"
 
 
 def _apply_agentview_noise_to_obs(
@@ -527,7 +535,7 @@ def run_one(
         else:
             model.infer(dict(obs=key_frame_list, compute_kv_cache=True, imagine=False, state=action))
 
-    out_file = Path(out_dir) / libero_benchmark / f"{task_idx}_{prompt.replace(' ', '_')}" / f"{episode_idx}_{done}.mp4"
+    out_file = Path(out_dir) / libero_benchmark / _task_dir_name(task_idx, prompt) / f"{episode_idx}_{done}.mp4"
     out_file.parent.mkdir(exist_ok=True, parents=True)
 
     save_video(
@@ -600,7 +608,7 @@ def run(
 
         completed = {}
         if resume:
-            video_dir = Path(out_dir) / libero_benchmark / f"{task_idx}_{task_prompt.replace(' ', '_')}"
+            video_dir = Path(out_dir) / libero_benchmark / _task_dir_name(task_idx, task_prompt)
             if video_dir.is_dir():
                 for file_name in os.listdir(video_dir):
                     match = _EPISODE_VIDEO_RE.match(file_name)
