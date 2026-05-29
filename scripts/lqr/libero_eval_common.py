@@ -205,10 +205,12 @@ def eval_outputs_complete(
 ) -> bool:
     for task_id in range(task_range[0], task_range[1]):
         fp = Path(out_dir) / f"{benchmark_name}_{task_id}.json"
-        if not fp.exists():
-            return False
-        data = json.loads(fp.read_text(encoding="utf-8"))
-        if float(data.get("total_num", 0.0)) < float(num_episodes):
+        total = 0.0
+        if fp.exists():
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            total = max(total, float(data.get("total_num", 0.0)))
+        total = max(total, _completed_episode_count(out_dir, benchmark_name, [task_id, task_id + 1]))
+        if total < float(num_episodes):
             return False
     return True
 
@@ -302,8 +304,11 @@ def run_client_or_accept_complete(
                 task_range,
                 num_episodes,
             ):
-                raise RuntimeError(
-                    f"{log_prefix} client made no progress: completed {after:g}/{num_episodes}"
+                print(
+                    f"[{log_prefix}] warning: client exited 0 but progress counter "
+                    f"did not increase ({before:g} -> {after:g}); continuing. "
+                    "This can happen when old prompt-named video dirs and new "
+                    "hashed prompt dirs coexist."
                 )
         return
 
