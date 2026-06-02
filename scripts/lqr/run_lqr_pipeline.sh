@@ -71,6 +71,7 @@ SKIP_EVAL="${SKIP_EVAL:-0}"
 EVAL_OUT_BASE="${EVAL_OUT_BASE:-outputs/lqr_eval_all_perturb_${PERTURB_TAG}_${TS}}"
 TASK_RANGE_START="${TASK_RANGE_START:-0}"
 TASK_RANGE_END="${TASK_RANGE_END:-2}"
+TASK_IDS="${TASK_IDS:-}"
 EVAL_NUM_EPISODES="${EVAL_NUM_EPISODES:-20}"
 # shellcheck source=scripts/lqr/slurm_port.sh
 source "${REPO_ROOT}/scripts/lqr/slurm_port.sh"
@@ -100,6 +101,7 @@ echo "PARTITIONS=${PARTITIONS:-<auto 3-partition>}"
 echo "JAC_METHOD=${JAC_METHOD}"
 echo "SVD_DIR=${SVD_DIR}"
 echo "EVAL_OUT_BASE=${EVAL_OUT_BASE}"
+echo "TASK_IDS=${TASK_IDS:-<unset>}"
 echo "PORT=${PORT} (SLURM_JOB_ID=${SLURM_JOB_ID:-<none>})"
 echo "INJECT_MODE=${INJECT_MODE}"
 echo "EVAL_STARTUP_WAIT_SEC=${EVAL_STARTUP_WAIT_SEC}"
@@ -264,6 +266,11 @@ else
     --perturb-spec "${PERTURB_SPEC}"
     --out-dir "${EVAL_OUT_BASE}"
   )
+  if [[ -n "${TASK_IDS}" ]]; then
+    TASK_IDS_NORMALIZED="${TASK_IDS//,/ }"
+    read -r -a TASK_IDS_ARR <<< "${TASK_IDS_NORMALIZED}"
+    EVAL_CMD+=(--task-ids "${TASK_IDS_ARR[@]}")
+  fi
   if [[ -n "${PROMPT}" ]]; then
     EVAL_CMD+=(--prompt "${PROMPT}")
   fi

@@ -83,7 +83,14 @@ def _format_report(
         first_summary = rows[0][2]
         lines.append(f"- perturb_spec: `{first_summary.get('perturb_spec', '')}`")
         lines.append(f"- libero_benchmark: `{first_summary.get('libero_benchmark', '')}`")
-        lines.append(f"- task_range: `{first_summary.get('task_range', '')}`")
+        task_ids = first_summary.get("task_ids")
+        task_range = first_summary.get("task_range")
+        if task_ids:
+            lines.append(f"- task_ids: `{task_ids}`")
+            lines.append("- task_selector: `explicit task_ids`")
+        else:
+            lines.append(f"- task_range: `{task_range}`")
+            lines.append("- task_selector: `contiguous task_range`")
         lines.append(f"- trials_per_variant: `{first_summary.get('num_episodes', '')}`")
     lines.append("")
 
@@ -122,7 +129,7 @@ def _format_report(
         lines.append("_No `summary.json` files found yet._")
 
     lines.append("")
-    lines.append("Per-variant columns are `avg_succ_rate` over tasks in `task_range`.")
+    lines.append("Per-variant columns are `avg_succ_rate` over the selected tasks.")
     lines.append("`avg_success_rate` is the mean across all non-nominal perturb variants.")
     return "\n".join(lines) + "\n"
 

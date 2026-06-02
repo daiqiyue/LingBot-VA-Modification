@@ -75,30 +75,8 @@ def save_video(
     print(f"Saving video: {len(real_obs_list)} frames...")
 
     final_frames = []
-    for frame_idx, obs in enumerate(real_obs_list):
+    for obs in real_obs_list:
         frame = np.hstack([cv2.resize(obs[name], target_size) for name in video_names]).astype(np.uint8)
-        if phase_labels is not None:
-            label = phase_labels[frame_idx]
-            cv2.putText(
-                frame,
-                label,
-                (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                frame,
-                label,
-                (10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 0, 0),
-                1,
-                cv2.LINE_AA,
-            )
         final_frames.append(frame)
 
     imageio.mimsave(save_path, final_frames, fps=fps)
