@@ -162,10 +162,6 @@ def main() -> None:
     cfg_inject_mode = cfg.get("inject_mode")
     if cfg_inject_mode is not None:
         args.inject_mode = str(cfg_inject_mode)
-    elif args.inject_mode == "auto":
-        cfg_modality = str(cfg.get("modality", "")).strip().lower()
-        if cfg_modality in {"action", "video", "both"}:
-            args.inject_mode = cfg_modality
     if args.jac_dir_act is None and cfg.get("jac_dir_act"):
         args.jac_dir_act = str(cfg["jac_dir_act"])
     elif args.jac_dir_act is None:
@@ -240,6 +236,7 @@ def main() -> None:
         "num_episodes": args.num_episodes,
         "resume": args.resume,
         "server_save_root": args.save_root,
+        "inject_mode": args.inject_mode,
         "lqr": {
             "lambda_scale": args.lambda_scale,
             "q_scale": args.q_scale,

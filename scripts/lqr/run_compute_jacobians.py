@@ -4,8 +4,9 @@ Computes within-step projected Jacobians on a real LIBERO observation:
 
   A_tilde[(t, l_in)] = V_{l_in+1, t}^T  J_{block_{l_in+1}}(z_{t, l_in})  V_{l_in, t}
 
-by running the LingBot action denoising loop once and applying autograd VJPs at
-selected transformer blocks, matching ctrlwam's ``compute_jacobians_full.py``.
+by running the matching LingBot denoising loop once and applying autograd VJPs
+at selected transformer blocks. Action-mode SVDs use the ctrlwam-aligned action
+loop; video-mode SVDs use the video denoising loop.
 
 B_tilde (cross-step) is skipped by default, consistent with Cosmos-Policy.
 
@@ -198,7 +199,7 @@ def projected_jacobian(
     raise ValueError(f"unknown mode {mode!r}")
 
 
-def _run_action_denoising_with_hooks(server, obs: Dict, hooks_state: Dict) -> None:
+def _run_denoising_with_hooks(server, obs: Dict, hooks_state: Dict) -> None:
     """Run video + action loops from VA_Server._infer with Jacobian hooks active."""
     import torch.nn.functional as F
     from einops import rearrange
@@ -240,7 +241,7 @@ def _run_action_denoising_with_hooks(server, obs: Dict, hooks_state: Dict) -> No
         timesteps = timesteps[:video_step]
     action_timesteps = F.pad(action_timesteps, (0, 1), mode="constant", value=0)
 
-    hooks_state["in_action"] = False
+    hooks_state["phase"] = "video"
     for i, t in enumerate(timesteps):
         last_step = i == len(timesteps) - 1
         latent_cond = init_latent[:, :, 0:1].to(server.dtype) if frame_st_id == 0 else None
@@ -278,6 +279,7 @@ def _run_action_denoising_with_hooks(server, obs: Dict, hooks_state: Dict) -> No
         latents[:, :, 0:1] = latent_cond if frame_st_id == 0 else latents[:, :, 0:1]
 
     hooks_state["pass_idx"] = -1
+    hooks_state["phase"] = "action"
     for i, t in enumerate(tqdm(action_timesteps, desc="action denoise")):
         last_step = i == len(action_timesteps) - 1
         action_cond = (
@@ -298,7 +300,7 @@ def _run_action_denoising_with_hooks(server, obs: Dict, hooks_state: Dict) -> No
             action_cond,
             frame_st_id=frame_st_id,
         )
-        hooks_state["in_action"] = True
+        hooks_state["phase"] = "action"
         try:
             action_noise_pred = server.transformer(
                 server._repeat_input_for_cfg(input_dict["action_res_lst"]),
@@ -307,7 +309,7 @@ def _run_action_denoising_with_hooks(server, obs: Dict, hooks_state: Dict) -> No
                 action_mode=True,
             )
         finally:
-            hooks_state["in_action"] = False
+            hooks_state["phase"] = None
 
         if not last_step:
             action_noise_pred = rearrange(
@@ -378,11 +380,11 @@ def run_vjp_worker(args: argparse.Namespace) -> int:
     layer_to_part = list(summary["layer_to_part"])
     k_target = int(cfg["k_target"])
     svd_mode = str(cfg.get("mode", "action"))
-    if svd_mode not in {"action", "both"}:
+    if svd_mode not in {"action", "video", "both"}:
         raise ValueError(
-            f"VJP Jacobians require SVD mode action/both, got {svd_mode!r}. "
-            "Re-run SVD with --mode action."
+            f"VJP Jacobians require SVD mode action/video/both, got {svd_mode!r}."
         )
+    jac_phase = "video" if svd_mode == "video" else "action"
 
     num_l_in = L - 1
     layer_shards = make_layer_shards(num_l_in, num_shards)
@@ -455,7 +457,7 @@ def run_vjp_worker(args: argparse.Namespace) -> int:
         v_cache[key] = vt
         return vt
 
-    hooks_state: Dict = {"pass_idx": -1, "in_action": False}
+    hooks_state: Dict = {"pass_idx": -1, "phase": None, "target_phase": jac_phase}
     in_ad = {"flag": False}
     jac_store: Dict[Tuple[int, int], torch.Tensor] = dict(existing)
     n_target_total = len(target_tl) + len(existing)
@@ -468,7 +470,7 @@ def run_vjp_worker(args: argparse.Namespace) -> int:
         by_lin.setdefault(l_in, set()).add(t)
 
     def _pass_tick(_block, _args):
-        if in_ad["flag"] or not hooks_state["in_action"]:
+        if in_ad["flag"] or hooks_state.get("phase") != hooks_state.get("target_phase"):
             return None
         hooks_state["pass_idx"] += 1
         return None
@@ -477,7 +479,7 @@ def run_vjp_worker(args: argparse.Namespace) -> int:
         l_out = l_in + 1
 
         def hook(block_next, h_args, kwargs):
-            if in_ad["flag"] or not hooks_state["in_action"]:
+            if in_ad["flag"] or hooks_state.get("phase") != hooks_state.get("target_phase"):
                 return None
             step = hooks_state["pass_idx"]
             if step not in target_steps:
@@ -565,10 +567,10 @@ def run_vjp_worker(args: argparse.Namespace) -> int:
 
     server._reset(prompt=prompt)
     run_t0[0] = time.time()
-    log(f"starting denoising (prompt={prompt!r}) ...")
+    log(f"starting {jac_phase} denoising VJP pass (prompt={prompt!r}) ...")
     try:
         with torch.no_grad():
-            _run_action_denoising_with_hooks(server, obs, hooks_state)
+            _run_denoising_with_hooks(server, obs, hooks_state)
     except _AllTargetsRecorded:
         log(f"early-stop: all targets recorded after {time.time() - run_t0[0]:.1f}s")
     finally:
@@ -623,7 +625,7 @@ def run_vjp_merge(args: argparse.Namespace) -> int:
             "obs_index": int(args.obs_index),
             "note": (
                 "A_tilde[(t, l_in)] = V_{l_in+1,t}^T J_{block_{l_in+1}}(z_{t,l_in}) V_{l_in,t}; "
-                "ctrlwam-aligned autograd VJP on LingBot action denoising. "
+                f"autograd VJP on LingBot {str(cfg.get('mode', 'action'))} denoising. "
                 "B_tilde skipped (Cosmos-Policy default)."
             ),
         },

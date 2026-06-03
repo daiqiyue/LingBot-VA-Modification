@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH -J lingbot_lqr_gaussian
-#SBATCH -A gts-gchou3
+#SBATCH -A gts-gchou3-ideas_l40s
 #SBATCH -N 1
-#SBATCH --gres=gpu:h200:1
+#SBATCH --gres=gpu:l40s:1
+#SBATCH --mem=128G
 #SBATCH -t 20:00:00
 #SBATCH -o Lqr_Gaussian_Report-%j.out
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -25,11 +26,19 @@ export LOCAL_RANK="${LOCAL_RANK:-0}"
 
 export CONFIG_NAME="${CONFIG_NAME:-libero}"
 export LIBERO_BENCHMARK="${LIBERO_BENCHMARK:-libero_10}"
-export TASK_ID="${TASK_ID:-0}"
-export NUM_EPISODES="${NUM_EPISODES:-10}"
-export SELECTED_TIMESTEPS="${SELECTED_TIMESTEPS:-0,10,20,30,40}"
+export TASK_ID="${TASK_ID:-6}"
+export NUM_EPISODES="${NUM_EPISODES:-20}"
 export COLLECT_MODE="${COLLECT_MODE:-action}"
-export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_gaussian.yaml}"
+if [[ -z "${SELECTED_TIMESTEPS:-}" ]]; then
+  if [[ "${COLLECT_MODE}" == "video" ]]; then
+    export SELECTED_TIMESTEPS="0,4,9,14,19"
+  else
+    export SELECTED_TIMESTEPS="0,10,20,30,40"
+  fi
+else
+  export SELECTED_TIMESTEPS
+fi
+export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_gaussian_30.yaml}"
 export PAIR_INIT_BY_SIMILARITY="${PAIR_INIT_BY_SIMILARITY:-0}"
 export NUM_SAMPLES="${NUM_SAMPLES:-200}"
 export K_TARGET="${K_TARGET:-64}"
@@ -39,9 +48,18 @@ export JAC_METHOD="${JAC_METHOD:-vjp}"
 export JAC_OBS_INDEX="${JAC_OBS_INDEX:-0}"
 export JAC_NUM_SHARDS="${JAC_NUM_SHARDS:-1}"
 export JAC_SUBDIR="${JAC_SUBDIR:-A_tilde_lingbot}"
-export LQR_CONFIG="${LQR_CONFIG:-scripts/lqr/configs/lqr_config.yaml}"
-export TASK_RANGE_START="${TASK_RANGE_START:-0}"
-export TASK_RANGE_END="${TASK_RANGE_END:-2}"
+if [[ -z "${LQR_CONFIG:-}" ]]; then
+  if [[ "${COLLECT_MODE}" == "video" ]]; then
+    export LQR_CONFIG="scripts/lqr/configs/lqr_config_video.yaml"
+  else
+    export LQR_CONFIG="scripts/lqr/configs/lqr_config.yaml"
+  fi
+else
+  export LQR_CONFIG
+fi
+export TASK_RANGE_START="${TASK_RANGE_START:-6}"
+export TASK_RANGE_END="${TASK_RANGE_END:-7}"
+export TASK_IDS="${TASK_IDS:-6 0 1 4 7}"
 export EVAL_NUM_EPISODES="${EVAL_NUM_EPISODES:-20}"
 source scripts/lqr/slurm_port.sh
 export EVAL_STARTUP_WAIT_SEC="${EVAL_STARTUP_WAIT_SEC:-1200}"
@@ -51,9 +69,11 @@ export PROMPT="${PROMPT:-}"
 
 echo "Running GAUSSIAN-LQR pipeline with:"
 echo "  REPO=$(pwd)"
+echo "  TASK_ID=${TASK_ID} (collect)"
 echo "  PERTURB_SPEC=${PERTURB_SPEC}"
 echo "  PARTITIONS=${PARTITIONS:-<auto 3-partition>}"
 echo "  JAC_METHOD=${JAC_METHOD}"
+echo "  TASK_IDS=${TASK_IDS}"
 echo "  TASK_RANGE=[${TASK_RANGE_START}, ${TASK_RANGE_END})"
 echo "  SKIP_EVAL=${SKIP_EVAL}"
 

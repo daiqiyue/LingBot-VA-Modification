@@ -33,8 +33,14 @@ TASK_ID="${TASK_ID:-0}"
 NUM_EPISODES="${NUM_EPISODES:-10}"
 N_POS="${N_POS:-${NUM_EPISODES}}"
 N_NEG="${N_NEG:-${NUM_EPISODES}}"
-SELECTED_TIMESTEPS="${SELECTED_TIMESTEPS:-0,10,20,30,40}"
 COLLECT_MODE="${COLLECT_MODE:-action}"
+if [[ -z "${SELECTED_TIMESTEPS:-}" ]]; then
+  if [[ "${COLLECT_MODE}" == "video" ]]; then
+    SELECTED_TIMESTEPS="0,4,9,14,19"
+  else
+    SELECTED_TIMESTEPS="0,10,20,30,40"
+  fi
+fi
 PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_camera.yaml}"
 EXISTING_COLLECT_DIR="${EXISTING_COLLECT_DIR:-}"
 EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-}"
@@ -78,9 +84,16 @@ source "${REPO_ROOT}/scripts/lqr/slurm_port.sh"
 EVAL_STARTUP_WAIT_SEC="${EVAL_STARTUP_WAIT_SEC:-1200}"
 INJECT_MODE="${INJECT_MODE:-auto}"
 PROMPT="${PROMPT:-}"
-LQR_CONFIG="${LQR_CONFIG:-scripts/lqr/configs/lqr_config.yaml}"
+if [[ -z "${LQR_CONFIG:-}" ]]; then
+  if [[ "${COLLECT_MODE}" == "video" ]]; then
+    LQR_CONFIG="scripts/lqr/configs/lqr_config_video.yaml"
+  else
+    LQR_CONFIG="scripts/lqr/configs/lqr_config.yaml"
+  fi
+fi
 AGENTVIEW_NOISE_SEED_BASE="${AGENTVIEW_NOISE_SEED_BASE:-}"
 AGENTVIEW_NOISE_SIGMA="${AGENTVIEW_NOISE_SIGMA:-}"
+GRIPPER_XYZ_BASE_SEED="${GRIPPER_XYZ_BASE_SEED:-}"
 RANDOM_CAMERA_BASE_SEED="${RANDOM_CAMERA_BASE_SEED:-}"
 
 echo "===== Lingbot LQR Pipeline ====="
@@ -107,6 +120,7 @@ echo "INJECT_MODE=${INJECT_MODE}"
 echo "EVAL_STARTUP_WAIT_SEC=${EVAL_STARTUP_WAIT_SEC}"
 echo "AGENTVIEW_NOISE_SEED_BASE=${AGENTVIEW_NOISE_SEED_BASE:-<unset>}"
 echo "AGENTVIEW_NOISE_SIGMA=${AGENTVIEW_NOISE_SIGMA:-<unset>}"
+echo "GRIPPER_XYZ_BASE_SEED=${GRIPPER_XYZ_BASE_SEED:-<unset>}"
 echo "RANDOM_CAMERA_BASE_SEED=${RANDOM_CAMERA_BASE_SEED:-<unset>}"
 echo "TS=${TS}"
 echo "================================"
@@ -279,6 +293,9 @@ else
   fi
   if [[ -n "${AGENTVIEW_NOISE_SIGMA}" ]]; then
     EVAL_CMD+=(--agentview-noise-sigma "${AGENTVIEW_NOISE_SIGMA}")
+  fi
+  if [[ -n "${GRIPPER_XYZ_BASE_SEED}" ]]; then
+    EVAL_CMD+=(--gripper-xyz-base-seed "${GRIPPER_XYZ_BASE_SEED}")
   fi
   if [[ -n "${RANDOM_CAMERA_BASE_SEED}" ]]; then
     EVAL_CMD+=(--random-camera-base-seed "${RANDOM_CAMERA_BASE_SEED}")
