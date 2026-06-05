@@ -7,7 +7,7 @@ name = "LingBot_VA"
 version = "0.0.0"
 description = "LingBot-VA: A Pragmatic VA Foundation Model"
 authors = [
-    { name = "Robbyant Team", email = "fengchang.ll@antgroup.com" }
+    { name = "Anonymous", email = "anonymous@example.com" }
 ]
 license = { file = "LICENSE.txt" }
 readme = "README.md"
@@ -36,12 +36,12 @@ dev = [
 ]
 
 [project.urls]
-homepage = "https://github.com/Robbyant"
-documentation = "https://github.com/Robbyant"
-repository = "https://github.com/Robbyant"
-huggingface = "https://github.com/Robbyant"
-modelscope = "https://github.com/Robbyant"
-discord = "https://github.com/Robbyant"
+homepage = "https://example.com/anonymous-project"
+documentation = "https://example.com/anonymous-project"
+repository = "https://example.com/anonymous-project"
+huggingface = "https://example.com/anonymous-project"
+modelscope = "https://example.com/anonymous-project"
+discord = "https://example.com/anonymous-project"
 
 [tool.setuptools]
 packages = ["lingbot_va"]
@@ -57,5 +57,4 @@ profile = "black"
 
 [tool.mypy]
 strict = true
-
 
