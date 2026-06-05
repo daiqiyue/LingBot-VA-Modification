@@ -15,6 +15,7 @@ from libero.libero.envs import OffScreenRenderEnv
 from wan_va.utils import init_logger
 
 from scripts.lqr.common import maybe_load_yaml, parse_int_list
+from scripts.lqr.perturbations import build_perturbation
 
 
 @dataclass
@@ -390,6 +391,13 @@ def _variant_list(spec_path: Optional[Path]) -> List[Dict[str, Any]]:
     return out
 
 
+def _obs_dict_with_perturb(
+    raw_obs: Dict[str, Any],
+    cam_keys: List[str],
+) -> Dict[str, np.ndarray]:
+    return _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
+
+
 def _run_one_trajectory(
     server,
     tracer: LingbotActivationTracer,
@@ -399,13 +407,18 @@ def _run_one_trajectory(
     cam_keys: List[str],
     top_k: int,
     variant: Dict[str, Any],
+    episode_idx: int,
     rng: Optional[np.random.Generator] = None,
     save_video: bool = True,
     max_env_steps: int = 800,
 ):
     env.reset()
-    raw_obs = env.set_init_state(init_state)
+    perturb = build_perturbation(variant)
+    raw_obs = perturb.set_init_state(env, init_state, episode_idx=episode_idx)
     for _ in range(5):
+        raw_obs, _, _, _ = env.step([0.0] * 7)
+    perturb.apply_to_env(env, episode_idx=episode_idx)
+    if str(variant.get("kind", "")).lower() in {"camera", "camera_view", "random_camera"}:
         raw_obs, _, _, _ = env.step([0.0] * 7)
     _apply_agentview_camera_rotation(
         env,
@@ -416,7 +429,10 @@ def _run_one_trajectory(
         raw_obs, _, _, _ = env.step([0.0] * 7)
 
     server._reset(prompt=prompt)
-    first_obs = _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
+    first_obs = _obs_dict_with_perturb(
+        raw_obs,
+        cam_keys,
+    )
     done = False
     infer_idx = 0
     first = True
@@ -432,15 +448,24 @@ def _run_one_trajectory(
         step_size=float(variant.get("eef_step_size", 0.01)),
         tolerance=float(variant.get("eef_tolerance", 0.01)),
     )
-    first_obs = _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
+    first_obs = _obs_dict_with_perturb(
+        raw_obs,
+        cam_keys,
+    )
 
     while env.env.timestep < max_env_steps:
-        infer_obs = _apply_agentview_noise_to_obs(
+        infer_obs = perturb.transform_observation(
             first_obs,
-            cam_keys,
-            sigma=variant.get("image_noise_sigma"),
-            rng=rng,
+            episode_idx=episode_idx,
+            inference_idx=infer_idx,
         )
+        if variant.get("image_noise_sigma") is not None:
+            infer_obs = _apply_agentview_noise_to_obs(
+                infer_obs,
+                cam_keys,
+                sigma=variant.get("image_noise_sigma"),
+                rng=rng,
+            )
         obs_payload = {"obs": [infer_obs]}
         frame_st_id = int(server.frame_st_id)
         tracer.reset_chunk()
@@ -466,9 +491,14 @@ def _run_one_trajectory(
                     break
                 if (j + 1) % action_per_frame == 0:
                     key_frame_obs = _obs_payload_from_raw(raw_obs, cam_keys)["obs"][0]
+                    perturbed_key_frame_obs = perturb.transform_observation(
+                        key_frame_obs,
+                        episode_idx=episode_idx,
+                        inference_idx=infer_idx,
+                    )
                     key_frame_list.append(
                         _apply_agentview_noise_to_obs(
-                            key_frame_obs,
+                            perturbed_key_frame_obs,
                             cam_keys=cam_keys,
                             sigma=variant.get("image_noise_sigma"),
                             rng=rng,
@@ -567,6 +597,29 @@ def main() -> None:
     cam_keys = list(server.job_config.obs_cam_keys)
     rows: List[Dict[str, Any]] = []
     save_video = not bool(args.disable_video)
+
+    def write_manifest() -> None:
+        summary = {
+            "config_name": args.config_name,
+            "libero_benchmark": args.libero_benchmark,
+            "task_id": int(args.task_id),
+            "task_language": task_lang,
+            "num_episodes": int(args.num_episodes),
+            "top_k_inference_per_traj": int(args.top_k_inference_per_traj),
+            "selected_timesteps": selected_timesteps,
+            "layers": layers,
+            "mode": args.mode,
+            "video_fps": int(args.video_fps),
+            "video_enabled": bool(save_video),
+            "variants": variants,
+            "records": rows,
+        }
+        tmp_path = args.out_dir / "manifest.json.tmp"
+        final_path = args.out_dir / "manifest.json"
+        tmp_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        tmp_path.replace(final_path)
+
+    write_manifest()
     try:
         for variant in variants:
             variant_name = str(variant["name"])
@@ -585,6 +638,7 @@ def main() -> None:
                         cam_keys=cam_keys,
                         top_k=int(args.top_k_inference_per_traj),
                         variant=variant,
+                        episode_idx=episode_idx,
                         rng=rng,
                         save_video=save_video,
                     )
@@ -632,28 +686,14 @@ def main() -> None:
                         f"[collect] variant={variant_name} ep={episode_idx} success={success} "
                         f"infer_calls={infer_calls} captured={len(captures)} video={'yes' if video_path else 'no'}"
                     )
+                    write_manifest()
             finally:
                 env.close()
     finally:
         tracer.close()
         transformer.forward = original_forward
 
-    summary = {
-        "config_name": args.config_name,
-        "libero_benchmark": args.libero_benchmark,
-        "task_id": int(args.task_id),
-        "task_language": task_lang,
-        "num_episodes": int(args.num_episodes),
-        "top_k_inference_per_traj": int(args.top_k_inference_per_traj),
-        "selected_timesteps": selected_timesteps,
-        "layers": layers,
-        "mode": args.mode,
-        "video_fps": int(args.video_fps),
-        "video_enabled": bool(save_video),
-        "variants": variants,
-        "records": rows,
-    }
-    (args.out_dir / "manifest.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    write_manifest()
     print(f"[collect] wrote {args.out_dir / 'manifest.json'}")
 
 

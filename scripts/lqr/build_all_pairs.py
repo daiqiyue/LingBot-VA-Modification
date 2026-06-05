@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 
-DEBUG_LOG_PATH = "/storage/home/hcoda1/9/qdai41/scratch/cosmos/.cursor/debug-810aa6.log"
+DEBUG_LOG_PATH = "/storage/scratch1/9/qdai41/cosmos/.cursor/debug-810aa6.log"
 DEBUG_SESSION_ID = "810aa6"
 
 

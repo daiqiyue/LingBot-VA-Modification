@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
 
 # --- collection knobs --------------------------------------------------------
 CONFIG_NAME="${CONFIG_NAME:-libero}"
@@ -44,15 +44,26 @@ MERGE_ONLY="${MERGE_ONLY:-0}"
 EXISTING_RUN_DIR="${EXISTING_RUN_DIR:-}"
 
 # --- slurm resources ---------------------------------------------------------
-ACCOUNT="${ACCOUNT:-bhhv-dtai-gh}"
-PARTITION_SLURM="${PARTITION_SLURM:-ghx4}"
+ACCOUNT="${ACCOUNT:-${SLURM_JOB_ACCOUNT:-${SLURM_ACCOUNT:-}}}"
+PARTITION_SLURM="${PARTITION_SLURM:-${SLURM_JOB_PARTITION:-${SLURM_PARTITION:-}}}"
+QOS="${QOS:-${SLURM_JOB_QOS:-${SLURM_QOS:-}}}"
 WORKER_TIME="${WORKER_TIME:-01:00:00}"
 MERGE_TIME="${MERGE_TIME:-00:10:00}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 MEM="${MEM:-96G}"
 EXCLUDE_NODES="${EXCLUDE_NODES:-}"
+GPU_GRES="${GPU_GRES:-gpu:h200:1}"
 
-CONDA_ENV_PATH="/projects/bhhv/jskifstad/LingBot-VA-Modification/.conda/envs/ling"
+SBATCH_ACCOUNT_ARGS=()
+[[ -n "$ACCOUNT" ]] && SBATCH_ACCOUNT_ARGS+=(--account="$ACCOUNT")
+SBATCH_PARTITION_ARGS=()
+[[ -n "$PARTITION_SLURM" ]] && SBATCH_PARTITION_ARGS+=(--partition="$PARTITION_SLURM")
+SBATCH_QOS_ARGS=()
+[[ -n "$QOS" ]] && SBATCH_QOS_ARGS+=(--qos="$QOS")
+SBATCH_GPU_ARGS=()
+[[ -n "$GPU_GRES" ]] && SBATCH_GPU_ARGS+=(--gres="$GPU_GRES")
+
+CONDA_ENV_PATH="${CONDA_ENV_PATH:-/storage/scratch1/9/qdai41/.conda/envs/lingbot}"
 _NVIDIA_PFX="$CONDA_ENV_PATH/lib/python3.10/site-packages/nvidia"
 
 # --- normalise task list -----------------------------------------------------
@@ -84,11 +95,12 @@ if [[ "$MERGE_ONLY" == "1" ]]; then
     COLLECT_JOB_ID=""
 else
     COLLECT_JOB_ID=$(sbatch --parsable \
-        --account="$ACCOUNT" \
-        --partition="$PARTITION_SLURM" \
+        "${SBATCH_ACCOUNT_ARGS[@]}" \
+        "${SBATCH_PARTITION_ARGS[@]}" \
+        "${SBATCH_QOS_ARGS[@]}" \
         --job-name="lingnominal_collect_${TS}" \
         --array="0-${LAST_JOB}" \
-        --gpus-per-task=1 \
+        "${SBATCH_GPU_ARGS[@]}" \
         --ntasks=1 \
         --cpus-per-task="$CPUS_PER_TASK" \
         --mem="$MEM" \
@@ -97,8 +109,9 @@ else
         --error="$LOG_DIR/collect_%a_%A.err" \
         ${EXCLUDE_NODES:+--exclude="$EXCLUDE_NODES"} \
         --wrap "
-set -euo pipefail
-source /sw/user/python/miniforge3-pytorch-2.11.0/etc/profile.d/conda.sh
+set -eo pipefail
+source ~/.bashrc
+set -u
 conda activate '$CONDA_ENV_PATH'
 export CUDA_HOME='$_NVIDIA_PFX/cuda_runtime'
 export PYTHONUTF8=1
@@ -125,7 +138,7 @@ echo \"[array \$SLURM_ARRAY_TASK_ID] task=\$TASK_ID shard=\$SHARD_IDX seed=\$SHA
 nvidia-smi -L
 
 COLLECT_ARGS=(
-    python scripts/lqr/run_collect_inputs.py
+    python interpretability/run_collect_inputs.py
     --config-name '$CONFIG_NAME'
     --libero-benchmark '$LIBERO_BENCHMARK'
     --task-id \"\$TASK_ID\"
@@ -147,14 +160,15 @@ fi
 
 # ---------- 2) merge manifests per task (no pairing) -------------------------
 DEP_FLAG=""
-[[ -n "$COLLECT_JOB_ID" ]] && DEP_FLAG="--dependency=afterok:${COLLECT_JOB_ID}"
+[[ -n "$COLLECT_JOB_ID" ]] && DEP_FLAG="--dependency=afterany:${COLLECT_JOB_ID}"
 
 MERGE_JOB_ID=$(sbatch --parsable \
-    --account="$ACCOUNT" \
-    --partition="$PARTITION_SLURM" \
+    "${SBATCH_ACCOUNT_ARGS[@]}" \
+    "${SBATCH_PARTITION_ARGS[@]}" \
+    "${SBATCH_QOS_ARGS[@]}" \
+    "${SBATCH_GPU_ARGS[@]}" \
     $DEP_FLAG \
     --job-name="lingnominal_merge_${TS}" \
-    --gpus-per-task=1 \
     --ntasks=1 \
     --cpus-per-task=4 \
     --mem=16G \
@@ -162,8 +176,9 @@ MERGE_JOB_ID=$(sbatch --parsable \
     --output="$LOG_DIR/merge_%j.out" \
     --error="$LOG_DIR/merge_%j.err" \
     --wrap "
-set -euo pipefail
-source /sw/user/python/miniforge3-pytorch-2.11.0/etc/profile.d/conda.sh
+set -eo pipefail
+source ~/.bashrc
+set -u
 conda activate '$CONDA_ENV_PATH'
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
@@ -212,7 +227,7 @@ print('\\n[merge] done.', flush=True)
 PYEOF
 ")
 
-echo "  merge job         : $MERGE_JOB_ID${COLLECT_JOB_ID:+ (afterok:$COLLECT_JOB_ID)}"
+echo "  merge job         : $MERGE_JOB_ID${COLLECT_JOB_ID:+ (afterany:$COLLECT_JOB_ID)}"
 echo
 echo "=== submitted ==="
 echo "  run_dir : $RUN_DIR"

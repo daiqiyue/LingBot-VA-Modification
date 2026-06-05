@@ -14,16 +14,50 @@ REPO_ROOT = Path(".").resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+def _parse_tasks_env(value: str, default: list[int]) -> list[int]:
+    if not value.strip():
+        return default
+    return [int(x) for x in value.replace(",", " ").split()]
+
+
 # Root directories produced by submit_collect_nominal.sh and submit_collect_activations.sh
-NOMINAL_RUN_DIR = Path("outputs/lqr_nominal/collect_20260528_140047")
-PERTURB_RUN_DIR = Path("outputs/lqr_activations_init_pos/collect_20260528_153741")
+NOMINAL_RUN_DIR = Path(os.environ.get("NOMINAL_RUN_DIR", "outputs/lqr_nominal/collect_20260528_140047"))
+PERTURB_RUN_DIR = Path(os.environ.get("PERTURB_RUN_DIR", "outputs/lqr_activations_init_pos/collect_20260528_153741"))
 
-OUTPUT_DIR       = "interpret_output_pos"
-ACTIVATIONS_PATH = "activations_dict_gripper.npz"
+OUTPUT_DIR       = os.environ.get("OUTPUT_DIR", "interpret_output_pos")
+ACTIVATIONS_PATH = os.environ.get("ACTIVATIONS_PATH", "activations_dict_gripper.npz")
 
-TASKS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+TASKS = _parse_tasks_env(os.environ.get("TASKS", ""), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
 N_BLOCKS = 30  # WanTransformer3DModel num_layers
+
+
+def _print_table(df, **kwargs) -> None:
+    try:
+        print(df.to_markdown(**kwargs))
+    except ImportError:
+        print(df.to_string())
+
+
+def _record_row_from_path(path: Path, task_id: int):
+    variant_name, episode_idx = path.stem, -1
+    if "__ep" in path.stem:
+        variant_name, ep_s = path.stem.rsplit("__ep", 1)
+        try:
+            episode_idx = int(ep_s)
+        except ValueError:
+            episode_idx = -1
+    return {
+        "variant_name": variant_name,
+        "is_nominal": bool(variant_name == "nominal"),
+        "task_id": int(task_id),
+        "episode_idx": int(episode_idx),
+        "trajectory_success": True,
+        "num_infer_calls": 0,
+        "num_captured": 0,
+        "path": str(path.resolve()),
+        "video_path": None,
+    }
 
 
 def _records_from_shards(run_dir: Path, task_id: int):
@@ -31,7 +65,16 @@ def _records_from_shards(run_dir: Path, task_id: int):
     task_dir = run_dir / f"task_{task_id}"
     records, lang = [], ""
     for shard_manifest in sorted(task_dir.glob("shard_*/manifest.json")):
-        m = json.loads(shard_manifest.read_text(encoding="utf-8"))
+        try:
+            m = json.loads(shard_manifest.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            recovered = [
+                _record_row_from_path(p, task_id)
+                for p in sorted((shard_manifest.parent / "trajectory_records").glob("*.pt"))
+            ]
+            print(f"[warn] recovered {len(recovered)} records from bad manifest {shard_manifest}: {exc}")
+            records.extend(recovered)
+            continue
         records.extend(m.get("records", []))
         if not lang:
             lang = m.get("task_language", "")
@@ -62,7 +105,11 @@ def collect_activations_from_pt(rec_path: Path) -> list:
 
     Returns a list of dicts {block_idx: np.ndarray[D]}, one dict per capture.
     """
-    rec = th.load(rec_path, weights_only=False)
+    try:
+        rec = th.load(rec_path, weights_only=False)
+    except Exception as exc:
+        print(f"\n[warn] skipping unreadable record {rec_path}: {type(exc).__name__}: {exc}")
+        return []
     captures = rec.get("captures", [])
     rows = []
     for cap in captures:
@@ -99,6 +146,13 @@ else:
 
 print(activations_by_task)
 
+
+def _save_activation_cache() -> None:
+    str_keyed_dict = {str(k): v for k, v in activations_by_task.items()}
+    Path(ACTIVATIONS_PATH).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(ACTIVATIONS_PATH, **str_keyed_dict)
+
+
 for t in TASKS:
     if t not in activations_by_task:
         pos_files, neg_files, lang = get_task_records(t)
@@ -116,11 +170,10 @@ for t in TASKS:
 
         activations_by_task[t] = {"positive": pos_rows, "negative": neg_rows}
         print(f"Task {t}: done — {len(pos_rows)} positive, {len(neg_rows)} negative captures")
+        _save_activation_cache()
 
 print("\nActivation collection complete")
-str_keyed_dict = {str(k): v for k, v in activations_by_task.items()}
-
-np.savez(ACTIVATIONS_PATH, **str_keyed_dict)
+_save_activation_cache()
 
 
 # Fit contrastive PCA per block per task.
@@ -278,7 +331,7 @@ df = pd.DataFrame.from_dict(svm_losses_by_task_block, orient="index")
 df = df.astype(float)
 
 print("Raw data")
-print(df.to_markdown())
+_print_table(df)
 
 df = pd.DataFrame.from_dict(processed, orient="index")
 
@@ -286,7 +339,7 @@ df = pd.DataFrame.from_dict(processed, orient="index")
 df = df.astype(float)
 
 print("Processed")
-print(df.to_markdown())
+_print_table(df)
 
 
 # 2D scatter — one figure per task, one subplot per DiT block
@@ -550,11 +603,9 @@ def _loss_summary(losses_dict, label):
         f"b{N_BLOCKS-1} avg loss": df[f"b{N_BLOCKS-1}"],
     })
     print(f"\n### Avg hinge loss per sample — all task pairs  [{label}]\n")
-    print(df.to_markdown(floatfmt=".4f"))
+    _print_table(df, floatfmt=".4f")
     print(f"\n### Summary: best block and last block  [{label}]\n")
-    print(summary.to_markdown(floatfmt=".4f"))
+    _print_table(summary, floatfmt=".4f")
 
 _loss_summary(pair_losses,    "2D SVM — top-2 PCs")
 _loss_summary(pair_losses_3d, "3D SVM — top-3 PCs")
-
-

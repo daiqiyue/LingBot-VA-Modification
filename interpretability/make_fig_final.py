@@ -34,16 +34,22 @@ COLORS  = {"positive": "#2196F3", "negative": "#FF5722"}
 MARKERS = ["o", "s", "^", "D", "v", "p", "*", "h"]
 
 # ── Paths / tasks ─────────────────────────────────────────────────────────────
+def _parse_tasks_env(value, default):
+    if not value.strip():
+        return default
+    return [int(x) for x in value.replace(",", " ").split()]
+
+
 # DATA_DIR         = "policy_inputs_new_cam"
-DATA_DIR         = "policy_inputs_noise"
+DATA_DIR         = os.environ.get("DATA_DIR", "policy_inputs_noise")
 # ACTIVATIONS_PATH = "activations_dict.npz"
 # OUTPUT_DIR       = "gripper_large_figs"
 
-OUTPUT_DIR = "actual_gripper_final_figs"
-ACTIVATIONS_PATH = "activations_dict_gripper.npz"
+OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "actual_gripper_final_figs")
+ACTIVATIONS_PATH = os.environ.get("ACTIVATIONS_PATH", "activations_dict_gripper.npz")
 
-TASKS        = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-CAMERA_TASKS = TASKS
+TASKS        = _parse_tasks_env(os.environ.get("TASKS", ""), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+CAMERA_TASKS = _parse_tasks_env(os.environ.get("CAMERA_TASKS", ""), TASKS)
 CAMERA_PAIRS = list(itertools.combinations(TASKS, 2))
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
