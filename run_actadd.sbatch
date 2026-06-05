@@ -12,7 +12,7 @@ source ~/.bashrc
 set -euo pipefail
 
 conda activate lingbot
-cd /storage/home/hcoda1/9/qdai41/scratch/cosmos/lingbot-va
+cd /storage/home/hcoda1/9/qdai41/scratch/cosmos/LingBot-VA-Modification
 
 export PYTHONPATH=.
 export PYTHONUNBUFFERED=1
@@ -25,14 +25,14 @@ STEERING_CFG="${STEERING_CFG:-scripts/activation_steering/configs/steering_confi
 TOKEN_POLICY="${TOKEN_POLICY:-scripts/activation_steering/configs/token_policy.yaml}"
 
 BENCHMARK="${BENCHMARK:-libero_10}"
-PORT="${PORT:-29056}"
+source scripts/lqr/slurm_port.sh
 CONFIG_NAME="${CONFIG_NAME:-libero}"
 
 # Default: task0 one-pass bank build.
 TASK_START="${TASK_START:-0}"
 TASK_END="${TASK_END:-1}"
 TRACE_NUM_EPISODES="${TRACE_NUM_EPISODES:-1}"
-EVAL_NUM_EPISODES="${EVAL_NUM_EPISODES:-10}"
+EVAL_NUM_EPISODES="${EVAL_NUM_EPISODES:-20}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 WORK_DIR="outputs/actadd_onepass_${TS}"

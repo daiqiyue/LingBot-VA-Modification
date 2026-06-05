@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH -J lingbot_lqr_eval
+#SBATCH -J lqr_eval_camera_sel
 #SBATCH -A gts-gchou3-ideas_l40s
 #SBATCH -q inferno
 #SBATCH -N 1
 #SBATCH --mem=128G
 #SBATCH --gres=gpu:l40s:1
 #SBATCH -t 20:00:00
-#SBATCH -o Lqr_eval_Report-%j.out
+#SBATCH -o Lqr_eval_camera_selected-%j.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=qdai41@gatech.edu
 
 source ~/.bashrc
 set -euo pipefail
 
-conda activate lingbot
+conda activate "${CONDA_ENV:-lingbot}"
 cd /storage/home/hcoda1/9/qdai41/scratch/cosmos/LingBot-VA-Modification
 
 export PYTHONPATH=.
@@ -28,19 +28,29 @@ export LOCAL_RANK="${LOCAL_RANK:-0}"
 export STARTUP_WAIT_SEC="${STARTUP_WAIT_SEC:-1200}"
 source scripts/lqr/slurm_port.sh
 
-echo "LQR eval startup wait: ${STARTUP_WAIT_SEC}s"
-echo "PORT=${PORT} (job ${SLURM_JOB_ID:-local})"
-echo "DDP env: MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT} RANK=${RANK} WORLD_SIZE=${WORLD_SIZE} LOCAL_RANK=${LOCAL_RANK}"
+SVD_DIR="${SVD_DIR:-outputs/lqr/svd_cam_random_large_seed42_20260528_084138}"
+EVAL_OUT_DIR="${EVAL_OUT_DIR:-outputs/lqr_eval_selected_cam_random_large_seed42_20260528_084138_no_title}"
+EVAL_CAM_BASE_SEED="${EVAL_CAM_BASE_SEED:-99}"
+
+echo "Running selected camera LQR eval"
+echo "  SVD_DIR=${SVD_DIR}"
+echo "  TASK_IDS=0 2 4 5 9"
+echo "  NUM_EPISODES=20"
+echo "  EVAL_CAM_BASE_SEED=${EVAL_CAM_BASE_SEED}"
+echo "  EVAL_OUT_DIR=${EVAL_OUT_DIR}"
+echo "  PORT=${PORT} (job ${SLURM_JOB_ID:-local})"
 
 python scripts/lqr/run_libero_lqr_eval.py \
   --config-name libero \
   --libero-benchmark libero_10 \
-  --task-range 0 2 \
-  --num-episodes 20 \
+  --task-ids 0 2 4 5 9 \
+  --num-episodes 10 \
   --startup-wait-sec "${STARTUP_WAIT_SEC}" \
   --port "${PORT}" \
-  --svd-dir outputs/lqr/svd_all_perturb_init_pos_4_20260525_105801 \
+  --svd-dir "${SVD_DIR}" \
   --jac-dir-act A_tilde_lingbot \
   --lqr-config scripts/lqr/configs/lqr_config.yaml \
-  --perturb-spec scripts/lqr/configs/eval_init_pos.yaml \
-  --out-dir outputs/lqr_eval_all_perturb_init_pos_4_20260525_105801_random_pos
+  --perturb-spec scripts/lqr/configs/perturb_spec_camera.yaml \
+  --random-camera-base-seed "${EVAL_CAM_BASE_SEED}" \
+  --out-dir "${EVAL_OUT_DIR}" \
+  --resume
