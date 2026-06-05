@@ -48,7 +48,7 @@ export LIBERO_BENCHMARK="${LIBERO_BENCHMARK:-libero_10}"
 # Collect row-aligned clean/noisy pairs on this task (ctrlwam task0 uses 10 for SVD).
 export TASK_ID="${TASK_ID:-6}"
 export NUM_EPISODES="${NUM_EPISODES:-10}"
-export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_gaussian.yaml}"
+export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_gaussian_25.yaml}"
 export PAIR_INIT_BY_SIMILARITY="${PAIR_INIT_BY_SIMILARITY:-0}"
 
 # Row-aligned clean/noisy pairs from job 9233555 (gaussian skips extra pairing).

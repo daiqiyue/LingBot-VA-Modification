@@ -24,19 +24,15 @@ export RANK="${RANK:-0}"
 export WORLD_SIZE="${WORLD_SIZE:-1}"
 export LOCAL_RANK="${LOCAL_RANK:-0}"
 
-# ctrlwam task07 gripper-XYZ init-position flow:
+# ctrlwam gripper-XYZ init-position flow:
 #   perturbed rollouts -> success/failed positive/negative buckets
 #   -> similarity pairing -> 3-partition SVD -> VJP Jacobians -> LQR eval
 #
-# Resume job 9240426 paired data (skip collect + pairing):
+# Fresh task1 full run:
 #   sbatch run_lqr_init_pos_ctrlwam.sbatch
-# Resume raw collect only (re-run pairing):
-#   sbatch --export=ALL,EXISTING_PAIRS_ALL_DIR=,EXISTING_COLLECT_DIR=outputs/lqr/pairs_init_pos_20260528_012010 run_lqr_init_pos_ctrlwam.sbatch
-# Fresh collect:
-#   sbatch --export=ALL,EXISTING_PAIRS_ALL_DIR=,EXISTING_COLLECT_DIR= run_lqr_init_pos_ctrlwam.sbatch
 export CONFIG_NAME="${CONFIG_NAME:-libero}"
 export LIBERO_BENCHMARK="${LIBERO_BENCHMARK:-libero_10}"
-export TASK_ID="${TASK_ID:-7}"
+export TASK_ID="${TASK_ID:-1}"
 export NUM_EPISODES="${NUM_EPISODES:-50}"
 export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_init_pos.yaml}"
 export PAIR_INIT_BY_SIMILARITY="${PAIR_INIT_BY_SIMILARITY:-1}"
@@ -45,10 +41,10 @@ export PAIR_MATCH_MODE="${PAIR_MATCH_MODE:-nn-greedy}"
 export PAIR_MAX_ROWS="${PAIR_MAX_ROWS:--1}"
 export PAIR_MAX_DISTANCE="${PAIR_MAX_DISTANCE:--1}"
 
-export EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-outputs/lqr/pairs_init_pos_20260528_012010__paired}"
+export EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-}"
 export EXISTING_COLLECT_DIR="${EXISTING_COLLECT_DIR:-}"
 export NUM_SAMPLES="${NUM_SAMPLES:--1}"
-export PROMPT="${PROMPT:-put both the alphabet soup and the cream cheese box in the basket}"
+export PROMPT="${PROMPT:-put both the cream cheese box and the butter in the basket}"
 
 export SELECTED_TIMESTEPS="${SELECTED_TIMESTEPS:-0,10,20,30,40}"
 export COLLECT_MODE="${COLLECT_MODE:-action}"
@@ -61,8 +57,8 @@ export JAC_NUM_SHARDS="${JAC_NUM_SHARDS:-1}"
 export JAC_SUBDIR="${JAC_SUBDIR:-A_tilde_lingbot}"
 export LQR_CONFIG="${LQR_CONFIG:-scripts/lqr/configs/lqr_config.yaml}"
 
-export TASK_RANGE_START="${TASK_RANGE_START:-7}"
-export TASK_RANGE_END="${TASK_RANGE_END:-8}"
+export TASK_RANGE_START="${TASK_RANGE_START:-1}"
+export TASK_RANGE_END="${TASK_RANGE_END:-2}"
 export EVAL_NUM_EPISODES="${EVAL_NUM_EPISODES:-20}"
 source scripts/lqr/slurm_port.sh
 export EVAL_STARTUP_WAIT_SEC="${EVAL_STARTUP_WAIT_SEC:-1200}"

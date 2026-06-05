@@ -13,8 +13,8 @@
 # 1-based indexing. LingBot hook indices are 0-based, so this runs
 # SELECTED_TIMESTEPS=4,9,14,19,24,29,34,39,44,49.
 #
-# This branch reuses the paired init-position NPZs by default, but writes a
-# new time-branch SVD/Jacobian under outputs/lqr_time.
+# This branch runs a fresh task1 init-position collection by default and writes
+# time-branch SVD/Jacobian artifacts under outputs/lqr_time.
 
 source ~/.bashrc
 set -euo pipefail
@@ -33,7 +33,7 @@ export LOCAL_RANK="${LOCAL_RANK:-0}"
 
 export CONFIG_NAME="${CONFIG_NAME:-libero}"
 export LIBERO_BENCHMARK="${LIBERO_BENCHMARK:-libero_10}"
-export TASK_ID="${TASK_ID:-7}"
+export TASK_ID="${TASK_ID:-1}"
 export NUM_EPISODES="${NUM_EPISODES:-50}"
 export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_init_pos.yaml}"
 export PAIR_INIT_BY_SIMILARITY="${PAIR_INIT_BY_SIMILARITY:-1}"
@@ -42,11 +42,11 @@ export PAIR_MATCH_MODE="${PAIR_MATCH_MODE:-nn-greedy}"
 export PAIR_MAX_ROWS="${PAIR_MAX_ROWS:--1}"
 export PAIR_MAX_DISTANCE="${PAIR_MAX_DISTANCE:--1}"
 
-export EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-outputs/lqr/pairs_init_pos_20260528_012010__paired}"
+export EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-}"
 export EXISTING_COLLECT_DIR="${EXISTING_COLLECT_DIR:-}"
 export EXISTING_SVD_DIR="${EXISTING_SVD_DIR:-}"
 export NUM_SAMPLES="${NUM_SAMPLES:--1}"
-export PROMPT="${PROMPT:-put both the alphabet soup and the cream cheese box in the basket}"
+export PROMPT="${PROMPT:-put both the cream cheese box and the butter in the basket}"
 
 export TIME_BRANCH_HUMAN_TIMESTEPS="${TIME_BRANCH_HUMAN_TIMESTEPS:-5,10,15,20,25,30,35,40,45,50}"
 export SELECTED_TIMESTEPS="${SELECTED_TIMESTEPS:-4,9,14,19,24,29,34,39,44,49}"
@@ -63,8 +63,8 @@ export LQR_CONFIG="${LQR_CONFIG:-scripts/lqr/configs/lqr_config.yaml}"
 export OUT_BASE="${OUT_BASE:-outputs/lqr_time}"
 export EVAL_OUT_BASE="${EVAL_OUT_BASE:-outputs/lqr_eval_time_init_pos_${SLURM_JOB_ID:-local}}"
 
-export TASK_RANGE_START="${TASK_RANGE_START:-7}"
-export TASK_RANGE_END="${TASK_RANGE_END:-8}"
+export TASK_RANGE_START="${TASK_RANGE_START:-1}"
+export TASK_RANGE_END="${TASK_RANGE_END:-2}"
 export EVAL_NUM_EPISODES="${EVAL_NUM_EPISODES:-20}"
 source scripts/lqr/slurm_port.sh
 export EVAL_STARTUP_WAIT_SEC="${EVAL_STARTUP_WAIT_SEC:-1200}"

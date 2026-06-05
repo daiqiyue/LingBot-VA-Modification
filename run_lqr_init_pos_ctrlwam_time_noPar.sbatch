@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -J lingbot_lqr_init_pos_time_noPar
-#SBATCH -A gts-gchou3-ideasci23_dgx
+#SBATCH -A gts-gchou3-ideas_l40s
 #SBATCH -N 1
-#SBATCH --gres=gpu:h100:1
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --mem=128G
 #SBATCH -t 24:00:00
 #SBATCH -o Lqr_InitPos_TimeNoPar-%j.out
@@ -33,7 +33,7 @@ export LOCAL_RANK="${LOCAL_RANK:-0}"
 
 export CONFIG_NAME="${CONFIG_NAME:-libero}"
 export LIBERO_BENCHMARK="${LIBERO_BENCHMARK:-libero_10}"
-export TASK_ID="${TASK_ID:-7}"
+export TASK_ID="${TASK_ID:-1}"
 export NUM_EPISODES="${NUM_EPISODES:-50}"
 export PERTURB_SPEC="${PERTURB_SPEC:-scripts/lqr/configs/perturb_spec_init_pos.yaml}"
 export PAIR_INIT_BY_SIMILARITY="${PAIR_INIT_BY_SIMILARITY:-1}"
@@ -42,11 +42,11 @@ export PAIR_MATCH_MODE="${PAIR_MATCH_MODE:-nn-greedy}"
 export PAIR_MAX_ROWS="${PAIR_MAX_ROWS:--1}"
 export PAIR_MAX_DISTANCE="${PAIR_MAX_DISTANCE:--1}"
 
-export EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-outputs/lqr/pairs_init_pos_20260528_012010__paired}"
+export EXISTING_PAIRS_ALL_DIR="${EXISTING_PAIRS_ALL_DIR:-}"
 export EXISTING_COLLECT_DIR="${EXISTING_COLLECT_DIR:-}"
 export EXISTING_SVD_DIR="${EXISTING_SVD_DIR:-}"
 export NUM_SAMPLES="${NUM_SAMPLES:--1}"
-export PROMPT="${PROMPT:-put both the alphabet soup and the cream cheese box in the basket}"
+export PROMPT="${PROMPT:-put both the cream cheese box and the butter in the basket}"
 
 export TIME_BRANCH_HUMAN_TIMESTEPS="${TIME_BRANCH_HUMAN_TIMESTEPS:-5,10,15,20,25,30,35,40,45,50}"
 export SELECTED_TIMESTEPS="${SELECTED_TIMESTEPS:-4,9,14,19,24,29,34,39,44,49}"
@@ -63,8 +63,8 @@ export LQR_CONFIG="${LQR_CONFIG:-scripts/lqr/configs/lqr_config.yaml}"
 export OUT_BASE="${OUT_BASE:-outputs/lqr_time_noPar}"
 export EVAL_OUT_BASE="${EVAL_OUT_BASE:-outputs/lqr_eval_time_noPar_init_pos_${SLURM_JOB_ID:-local}}"
 
-export TASK_RANGE_START="${TASK_RANGE_START:-7}"
-export TASK_RANGE_END="${TASK_RANGE_END:-8}"
+export TASK_RANGE_START="${TASK_RANGE_START:-1}"
+export TASK_RANGE_END="${TASK_RANGE_END:-2}"
 export EVAL_NUM_EPISODES="${EVAL_NUM_EPISODES:-20}"
 source scripts/lqr/slurm_port.sh
 export EVAL_STARTUP_WAIT_SEC="${EVAL_STARTUP_WAIT_SEC:-1200}"
