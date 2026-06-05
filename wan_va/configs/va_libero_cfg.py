@@ -1,4 +1,6 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
+import os
+
 from easydict import EasyDict
 
 from .shared_config import va_shared_cfg
@@ -7,7 +9,10 @@ va_libero_cfg = EasyDict(__name__='Config: VA libero')
 va_libero_cfg.update(va_shared_cfg)
 va_shared_cfg.infer_mode = 'server'
 
-va_libero_cfg.wan22_pretrained_model_name_or_path = "/storage/home/hcoda1/9/qdai41/scratch/cosmos/models/checkpoints/lingbot-libero"
+va_libero_cfg.wan22_pretrained_model_name_or_path = os.environ.get(
+    "LINGBOT_LIBERO_CKPT_PATH",
+    "/path/to/lingbot-libero",
+)
 
 va_libero_cfg.attn_window = 30
 va_libero_cfg.frame_chunk_size = 4

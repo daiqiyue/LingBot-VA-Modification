@@ -1,581 +1,454 @@
-<h1 align="center">LingBot-VA: Causal World Modeling for Robot Control</h1>
+# LingBot-VA LIBERO Baseline and LQR Workflow
 
-<p align="center">
-  <a href="https://arxiv.org/abs/2601.21998"><img src="https://img.shields.io/static/v1?label=Paper&message=PDF&color=red&logo=arxiv"></a>
-  <a href="https://technology.robbyant.com/lingbot-va"><img src="https://img.shields.io/badge/Project-Website-blue"></a>
-  <a href="https://huggingface.co/collections/robbyant/lingbot-va"><img src="https://img.shields.io/static/v1?label=%F0%9F%A4%97%20Model&message=HuggingFace&color=orange"></a>
-  <a href="https://modelscope.cn/collections/Robbyant/LingBot-VA"><img src="https://img.shields.io/static/v1?label=%F0%9F%A4%96%20Model&message=ModelScope&color=purple"></a>
-  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/License-Apache--2.0-green"></a>
-</p>
+This repository contains a cleaned LIBERO evaluation workflow for two experiment
+families:
 
-<p align="center">
-  <img src="assets/teaser_v3.png" width="100%">
-</p>
+- Vanilla policy baseline under perturbations.
+- LQR activation steering under the same perturbations.
 
+The code is intentionally free of machine-specific paths. Any path that depends
+on your server, user name, storage mount, conda installation, checkpoint
+location, or local cache should be passed through an environment variable. Dummy
+paths in this README use `/path/to/...`; replace them with real paths on your
+machine before running.
 
+## Repository Layout
 
-https://github.com/user-attachments/assets/cec7b7a6-953b-4fa4-8f1a-47efc1fce547
+Important files and directories:
 
+- `wan_va/`: LingBot-VA model, server, training, and config code.
+- `evaluation/libero/client.py`: LIBERO rollout client. Both baseline and LQR
+  eval use this client.
+- `scripts/lqr/`: shared baseline/LQR experiment code.
+- `scripts/lqr/run_libero_policy_eval.py`: vanilla baseline evaluator.
+- `scripts/lqr/run_libero_lqr_eval.py`: LQR evaluator.
+- `scripts/lqr/run_lqr_pipeline.sh`: end-to-end LQR artifact and eval pipeline.
+- `scripts/lqr/configs/`: perturbation and controller configs.
+- `run_baseline_perturbations.sh`: runs baseline eval for init-position,
+  Gaussian, and camera perturbations.
+- `run_lqr_init_pos.sh`: runs the init-position LQR pipeline.
+- `run_lqr_gaussian.sh`: runs the Gaussian-noise LQR pipeline.
+- `run_lqr_camera.sh`: runs the camera-perturbation LQR pipeline.
 
+The old `scripts/activation_steering/` and single `script/` workflows are not
+needed for the current baseline/LQR LIBERO flow.
 
+## Dummy Paths and Local Configuration
 
-## Table of Contents
+The repo uses these environment variables for local paths and machine-specific
+settings:
 
-- [News](#-news)
-- [Model Download](#-model-download)
-- [Quick Start](#️-quick-start)
-  - [Installation](#installation)
-  - [attn_mode Configuration](#️-important-attn_mode-configuration)
-  - [Deploying LingBot-VA for Inference](#deploying-lingbot-va-for-inference)
-    - [Evaluation on RoboTwin-2.0](#evaluation-on-robotwin-20)
-    - [Evaluation on LIBERO](#evaluation-on-libero)
-    - [Run Image to Video-Action Generation](#run-image-to-video-action-generation)
-  - [Post-Training LingBot-VA](#post-training-lingbot-va)
-    - [Data Preparation](#data-preparation)
-    - [Custom Dataset Preparation](#custom-dataset-preparation)
-    - [Training](#training)
-- [Performance](#-performance)
-  - [Simulation Evaluation](#simulation-evaluation)
-  - [Real-world Deployment](#real-world-deployment)
-- [License](#-license)
-- [Citation](#citation)
-- [Acknowledgments](#-acknowledgments)
+| Variable | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `LINGBOT_REPO_DIR` | No | directory containing the launcher script | Override the repo root if launching from another location. |
+| `CONDA_ENV` | No | `lingbot` | Conda environment to activate. |
+| `LINGBOT_LIBERO_CKPT_PATH` | Yes for eval | `/path/to/lingbot-libero` | Local LingBot-VA LIBERO checkpoint directory. |
+| `PORT` | No | computed from `PORT_BASE` and optional `SLURM_JOB_ID` | WebSocket port used by server/client. |
+| `PORT_BASE` | No | `29056` | Base port used when `PORT` is not set. |
+| `OUT_BASE` | No | depends on script | Output root for generated results. |
+| `LINGBOT_DEBUG_LOG_PATH` | No | `outputs/debug/build_all_pairs_debug.jsonl` | Debug log path for `build_all_pairs.py`; set empty to disable. |
+| `WANDB_API_KEY` | Only for training with wandb | unset | W&B API key. Not needed for baseline or LQR eval. |
+| `WANDB_BASE_URL` | Only for training with wandb | unset | W&B server URL. |
+| `WANDB_TEAM_NAME` | Only for training with wandb | unset | W&B entity/team name. |
+| `WANDB_PROJECT` | Only for training with wandb | `va_robotwin` | W&B project name. |
 
----
-
-## 💫 Meet **LingBot-VA**!  We've built an AR diffusion framework for simultaneous world modeling and action! 🤖✨
-
-**LingBot-VA** has focused on:
-- **Autoregressive Video-Action World Modeling**: Architecturally unifies visual dynamics prediction and action inference within a single interleaved sequence while maintaining their conceptual distinction.
-- **High-efficiency Execution**: A dual-stream mixture-of-transformers(MoT) architecture with Asynchronous Execution and KV Cache.
-- **Long-Horizon Performance and Generalization**: High improvements in sample efficiency, long-horizon success rates, and generalization to novel scenes.
-
-# 🚀 News
-- **[2026-04-24]** Weights for post-train on **LIBERO-LONG** released! (**IMPORTANT**: Ensure that `va_libero_cfg.action_snr_shift`, `va_libero_cfg.used_action_channel_ids` and `va_libero_cfg.norm_stat` in [`wan_va/configs/va_libero_cfg.py`](wan_va/configs/va_libero_cfg.py) are synchronized with the latest version of the repository.)
-- **[2026-04-08]** Post-training and inference code for the **LIBERO** dataset is now available!
-- **[2026-02-17]** Post-training code and dataset released! Support fine-tuning LingBot-VA on custom robotic manipulation datasets.
-- **[2026-01-29]** Weights and code for shared backbone released! Please stay tuned for our separated version!
-
-
-
-
----
-
-
-
-# 📦 Model Download
-- **Pretrained Checkpoints for Post-Training**
-
-| Model Name | Huggingface Repository | ModelScope Repository  | Description |
-| :--- | :--- | :--- | :--- |
-| lingbot-va-base &nbsp; | [🤗 robbyant/lingbot-va-base &nbsp;](https://huggingface.co/robbyant/lingbot-va-base) | [🤖 Robbyant/lingbot-va-base &nbsp;](https://modelscope.cn/models/Robbyant/lingbot-va-base)  | LingBot-VA w/ shared backbone|
-| lingbot-va-posttrain-robotwin &nbsp; | [🤗 robbyant/lingbot-va-posttrain-robotwin &nbsp;](https://huggingface.co/robbyant/lingbot-va-posttrain-robotwin) | [🤖 Robbyant/lingbot-va-posttrain-robotwin &nbsp;](https://modelscope.cn/models/Robbyant/lingbot-va-posttrain-robotwin)  | LingBot-VA-Posttrain-Robotwin w/ shared backbone|
-| lingbot-va-posttrain-libero-long &nbsp; | [🤗 robbyant/lingbot-va-posttrain-libero-long &nbsp;](https://huggingface.co/robbyant/lingbot-va-posttrain-libero-long) | [🤖 Robbyant/lingbot-va-posttrain-libero-long &nbsp;](https://modelscope.cn/models/Robbyant/lingbot-va-posttrain-libero-long)  | LingBot-VA-Posttrain-LIBERO-LONG w/ shared backbone|
-
-- **Post-Training Dataset**
-
-| Dataset Name | Huggingface Repository | ModelScope Repository | Description |
-| :--- | :--- | :--- | :--- |
-| robotwin-clean-and-aug-lerobot &nbsp; | [🤗 robbyant/robotwin-clean-and-aug-lerobot](https://huggingface.co/datasets/robbyant/robotwin-clean-and-aug-lerobot) | [🤖 Robbyant/robotwin-clean-and-aug-lerobot](https://modelscope.cn/datasets/Robbyant/robotwin-clean-and-aug-lerobot) | Cleaned & augmented RoboTwin dataset in LeRobot format for post-training |
-| libero-long-lerobot &nbsp; | [🤗 robbyant/libero-long-lerobot](https://huggingface.co/datasets/robbyant/libero-long-lerobot) | [🤖 Robbyant/libero-long-lerobot](https://modelscope.cn/datasets/Robbyant/libero-long-lerobot) | LIBERO-Long dataset in LeRobot format for post-training |
----
-
-# 🛠️ Quick Start
-
-## Installation
-**Requirements**
- • Python == 3.10.16
- • Pytorch == 2.9.0
- • CUDA 12.6
+Minimum path replacement before evaluation:
 
 ```bash
-pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu126
-pip install websockets einops diffusers==0.36.0 transformers==4.55.2 accelerate msgpack opencv-python matplotlib ftfy easydict
+export LINGBOT_LIBERO_CKPT_PATH=/path/to/checkpoints/lingbot-libero
+```
+
+Optional repo override:
+
+```bash
+export LINGBOT_REPO_DIR=/path/to/LingBot-VA-Modification
+```
+
+The launcher scripts now compute the repo root from their own location, so in
+normal use you can run them directly from the repo directory without setting
+`LINGBOT_REPO_DIR`.
+
+## Environment Setup
+
+These steps assume a Linux machine with CUDA-capable GPU access and conda.
+
+1. Create and activate a Python 3.10 environment:
+
+```bash
+conda create -n lingbot python=3.10 -y
+conda activate lingbot
+```
+
+2. Install PyTorch. Pick the wheel that matches your CUDA runtime. For CUDA
+12.6, the pinned environment used by this project is:
+
+```bash
+pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 \
+  --index-url https://download.pytorch.org/whl/cu126
+```
+
+3. Install repository dependencies:
+
+```bash
+cd /path/to/LingBot-VA-Modification
+pip install -r requirements.txt
+```
+
+If `flash_attn` fails from source build isolation, install it after PyTorch:
+
+```bash
 pip install flash-attn --no-build-isolation
 ```
 
-
-## ⚠️ Important: `attn_mode` Configuration
-
-> **You MUST change the `attn_mode` setting depending on whether you are training or running inference.**
-> Since LingBot-VA is loaded via `from_pretrained`, this parameter is read from the model folder's **`transformer/config.json`**.
-> You need to **manually edit** this file before launching.
->
-> | Mode | `attn_mode` value | Notes |
-> |---|---|---|
-> | **Training** | `"flex"` | Required for training. **Will not work** for inference. |
-> | **Inference / Evaluation** | `"torch"` or `"flashattn"` | Required for inference. `"flex"` will cause errors at eval time. |
->
-> **How to change:** Open `<your-model-path>/transformer/config.json`, find the `"attn_mode"` field, and set it to the appropriate value.
-
----
-
-## Deploying LingBot-VA for Inference
-LingBot-VA supports both standalone execution and Server-Client architecture which separates the model environment from simulation. By isolating dependencies, the design avoids package clashes and supports distributed inference on GPUs, clusters, and other devices.
-
-<!-- ### Standalone  Inference
-```python
-python inference.py
-```
-This processes the example data from `examples/0/` and saves visualizations to `result/`. -->
-
-### Evaluation on RoboTwin-2.0
-
-**Preparing the Environment**
-
-You can follow the official instructions from the original RoboTwin-2.0 repository:  
-[https://robotwin-platform.github.io/doc/usage/robotwin-install.html](https://robotwin-platform.github.io/doc/usage/robotwin-install.html)
-
-
-In summary:
-
-1. Install Vulkan dependencies:
-   ```bash
-   sudo apt install libvulkan1 mesa-vulkan-drivers vulkan-tools
-   ```
-
-2. Clone the RoboTwin repository:
-   ```bash
-   git clone https://github.com/RoboTwin-Platform/RoboTwin.git && cd RoboTwin && git checkout 2eeec322
-   ```
-
-3. Modify `script/requirements.txt` with the following content:
-   ```txt
-   transforms3d==0.4.2
-   sapien==3.0.0b1
-   scipy==1.10.1
-   mplib==0.2.1
-   gymnasium==0.29.1
-   trimesh==4.4.3
-   open3d==0.18.0
-   imageio==2.34.2
-   pydantic
-   zarr
-   openai
-   huggingface_hub==0.36.2
-   h5py
-   # For Description Generation
-   azure==4.0.0
-   azure-ai-inference
-   pyglet<2
-   wandb
-   moviepy
-   imageio
-   termcolor
-   av
-   matplotlib
-   ffmpeg
-   ```
-
-4. Modify line 8 of `script/_install.sh`:
-   ```bash
-   pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
-   ```
-
-5. Install dependencies:
-   ```bash
-   bash script/_install.sh
-   ```
-
-6. Download assets:
-   ```bash
-   bash script/_download_assets.sh
-   ```
-
- **Deploying the Inference Server**
-```bash
-# single GPU
-bash evaluation/robotwin/launch_server.sh
-
-# multi-GPU
-bash evaluation/robotwin/launch_server_multigpus.sh
-```
-
- **Executing the Inference Client**
-```bash
-# single GPU
-task_name="adjust_bottle";
-save_root="results/";
-bash evaluation/robotwin/launch_client.sh ${save_root} ${task_name}
-
-# multi-GPU
-save_root="results/"
-task_group_id=0;
-bash evaluation/robotwin/launch_client_multigpus.sh ${save_root} ${task_group_id}
-```
-
-Related experiments results will be save in `/path/to/your/RoboTwin/${save_root}`. Please note that an `eval_result` folder is also generated. This is a native output from RoboTwin and is identical to the contents in the results folder; it can be safely ignored.
-It is important to note that the inference server and client must be deployed on the same machine. For launching multi-GPU client, we padded the original 50 tasks to 56 via duplication and partitioned them into 7 groups to align with the 8-GPU configuration of our inference node. You can specify the `task_group_id` (0-6) to select a particular group for inference. For detailed grouping configurations, please refer to `evaluation/robotwin/launch_client_multigpus.sh`.
-
-> **GPU Memory Requirements**: Approximately **24GB VRAM** for single-GPU RoboTwin evaluation with offload mode enabled (VAE and text_encoder offloaded to CPU).
-
-
-### Evaluation on LIBERO
-Follow the official instructions to install LIBERO, then launch the server and client:
-
+4. Install this repo in editable mode if your environment needs package metadata:
 
 ```bash
-# server
-bash evaluation/libero/launch_server.sh
-
-# client
-bash evaluation/libero/launch_client.sh
+pip install -e .
 ```
 
-### Run Image to Video-Action Generation
-
-We also provide a script for image to video-action generation:
+5. Install or prepare LIBERO assets. The exact command depends on your LIBERO
+installation. A common pattern is:
 
 ```bash
-NGPU=1 CONFIG_NAME='robotwin_i2av' bash script/run_launch_va_server_sync.sh
+python -c "import libero; print(libero.__file__)"
 ```
 
-> **GPU Memory Requirements**: Approximately **18GB VRAM** for single-GPU i2av inference with offload mode enabled (VAE and text_encoder offloaded to CPU).
-
-
-## Post-Training LingBot-VA
-
-We support post-training (fine-tuning) LingBot-VA on custom robotic manipulation datasets. The training pipeline uses FSDP for distributed training and integrates with [LeRobot](https://github.com/huggingface/lerobot) dataset format.
-
-### Additional Dependencies
-
-On top of the base installation, post-training requires:
+Then follow your LIBERO package's asset setup instructions. Verify that
+`evaluation/libero/client.py` can import:
 
 ```bash
-pip install lerobot==0.3.3 scipy wandb --no-deps
+python - <<'PY'
+from libero.libero import benchmark
+from libero.libero.envs import OffScreenRenderEnv
+print("LIBERO import OK")
+PY
 ```
 
-### Data Preparation
-
-Download the post-training dataset from HuggingFace:
+6. If robosuite asks you to create private macros, run the setup command printed
+by robosuite in your environment. It usually looks like:
 
 ```bash
-huggingface-cli download --repo-type dataset robbyant/robotwin-clean-and-aug-lerobot --local-dir /path/to/your/dataset
+python /path/to/conda/envs/lingbot/lib/python3.10/site-packages/robosuite/scripts/setup_macros.py
 ```
 
-### Custom Dataset Preparation
-
-If you want to fine-tune LingBot-VA on your own robotic manipulation data, follow these steps:
-
-#### Example Dataset
-
-We provide a converted example dataset based on data from [Issue #29](https://github.com/Robbyant/lingbot-va/issues/29). This dataset has been converted into the expected format and is fully supported for training. You can download it to understand the required data structure:
-
-- **Download**: [Example Dataset](https://drive.google.com/file/d/1D52nK4ZOJmWBXKv1nWrLb9YBwq8nKa_b/view?usp=sharing)
-
-This example can serve as a reference for converting your own robotic manipulation data into the proper format.
-
-#### Data Pipeline Overview
-
-When preparing your custom dataset, the data goes through the following processing pipeline:
-
-1. **Raw Data** → Convert to LeRobot format (with metadata and video files)
-2. **Add Action Segmentation** → Add `action_config` to `episodes.jsonl`
-3. **Extract Latents** → Process videos through VAE according to video specifications
-4. **Dataset Loading** → Load processed data with proper action dimensions for training
-
-The final data should conform to these specifications:
-
-**Action Format:**
-- Output dimension: **30 dimensions**, structured as follows:
-  - Left arm EEF (end-effector): 7 dimensions
-  - Right arm EEF (end-effector): 7 dimensions
-  - Left arm joints: 7 dimensions
-  - Right arm joints: 7 dimensions
-  - Left arm gripper: 1 dimension
-  - Right arm gripper: 1 dimension
-- In your dataset class loader, map your robot's action dimensions to this standard 30-dimensional format. Missing dimensions are padded with **0**.
-
-**Video Format:**
-- During VAE latent extraction, resize videos to **~256 × 256 pixels** and downsample to **5-15 fps** as a reference (adjust based on your task requirements).
-
-#### Implementation Steps
-
-**Step 1: Convert your data to LeRobot format**
-
-Follow the official [LeRobot dataset documentation](https://github.com/huggingface/lerobot/tree/v0.3.3) to convert your raw data (e.g., HDF5, video files, etc.) into the standard LeRobot dataset format. Ensure that each episode contains the required observation videos, actions, and metadata.
-
-**Step 2: Add `action_config` field to `episodes.jsonl`**
-
-After converting to LeRobot format, you need to modify the `meta/episodes.jsonl` file to add an `action_config` field to each line. This field describes the temporal segmentation and natural language description of the robot's actions within each episode.
-
-Each line in `episodes.jsonl` should follow this format:
-
-```json
-{
-  "episode_index": 0,
-  "tasks": ["task description"],
-  "length": 450,
-  "action_config": [
-    {
-      "start_frame": 0,
-      "end_frame": 450,
-      "action_text": "Natural language description of the robot action in this segment.",
-    }
-  ]
-}
-```
-
-- `start_frame` / `end_frame`: The frame range (0-indexed) of the action segment within the episode.
-- `action_text`: A natural language description of what the robot does in this segment.
-
-For episodes with a single continuous action, `start_frame` should be `0` and `end_frame` should equal the episode `length`. You can also define multiple segments per episode if your data contains sequential sub-tasks.
-
-**Step 3: Extract video latents with Wan2.2 VAE**
-
-LingBot-VA operates on video latent representations rather than raw pixels. You need to extract the latent features using the Wan2.2 VAE encoder and place them under the converted LeRobot dataset directory. Please refer to the [Wan-Video documentation](https://github.com/Wan-Video) for instructions on how to run the VAE encoder.
-
-The extracted latent files should be placed under `latents/` in your dataset directory, mirroring the structure of `videos/`:
-
-```
-your_dataset/
-├── videos/
-│   └── chunk-000/
-│       └── observation.images.cam_high/
-│           ├── episode_000000.mp4
-│           └── ...
-├── latents/
-│   └── chunk-000/
-│       └── observation.images.cam_high/
-│           ├── episode_000000_0_450.pth    # named as episode_{index}_{start_frame}_{end_frame}.pth
-│           └── ...
-└── meta/
-    └── episodes.jsonl
-```
-
-Each `.pth` file is a dictionary containing the following fields:
-
-| Key | Type | Description |
-| :--- | :--- | :--- |
-| `latent` | `Tensor [N, C]` (bfloat16) | Flattened VAE latent features (e.g., shape `[latent_num_frames * latent_height * latent_width, C]`) |
-| `latent_num_frames` | `int` | Number of temporal frames in the latent space |
-| `latent_height` | `int` | Spatial height in the latent space |
-| `latent_width` | `int` | Spatial width in the latent space |
-| `video_num_frames` | `int` | Number of frames in the (sampled) source video |
-| `video_height` | `int` | Original video height in pixels |
-| `video_width` | `int` | Original video width in pixels |
-| `text_emb` | `Tensor [L, D]` (bfloat16) | Text embedding of the action description (encoded by Wan2.2 text encoder) |
-| `text` | `str` | The raw action description text |
-| `frame_ids` | `list[int]` | Sampled frame indices from the original episode (at target fps) |
-| `start_frame` | `int` | Start frame index matching `action_config` in `episodes.jsonl` |
-| `end_frame` | `int` | End frame index matching `action_config` in `episodes.jsonl` |
-| `fps` | `int` | Target sampling fps used for latent extraction |
-| `ori_fps` | `int` | Original fps of the episode data |
-
-The latent file naming convention `episode_{index}_{start_frame}_{end_frame}.pth` corresponds to the `action_config` segments defined in `episodes.jsonl`. For example, an episode with `"start_frame": 0, "end_frame": 450` produces a latent file named `episode_000000_0_450.pth`.
-
-### Training
+7. Configure the LingBot checkpoint path:
 
 ```bash
-# RoboTwin
-NGPU=8 CONFIG_NAME='robotwin_train' bash script/run_va_posttrain.sh
-
-# LIBERO
-NGPU=8 CONFIG_NAME='libero_train' bash script/run_va_posttrain.sh
+export LINGBOT_LIBERO_CKPT_PATH=/path/to/checkpoints/lingbot-libero
 ```
 
-For better training performance, use a larger global batch size (e.g., 32, 64). If you have limited GPU resources, you can increase `gradient_accumulation_steps` to achieve a larger effective batch size.
+The checkpoint directory should contain the model files expected by
+`wan_va/configs/va_libero_cfg.py`. In particular, the transformer config inside
+the checkpoint must use an inference-compatible attention mode.
 
+## Attention Mode Check
 
----
+LingBot-VA reads `attn_mode` from the checkpoint's `transformer/config.json`.
+Before inference or evaluation, check:
 
-# 📊 Performance
+```bash
+python - <<'PY'
+import json
+import os
+from pathlib import Path
 
-We evaluate our model on both simulation benchmarks and real-world scenarios, and achieve state-of-the-art performance.
-
-## Simulation Evaluation
-
-- **RoboTwin 2.0**
-
-We are the first to propel RoboTwin 2.0 metrics performance past the 90+ threshold！
-<table style="border-collapse: collapse; width: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; font-size: 13px; line-height: 1.2;">
-<!-- 指标说明 -->
-  <p style="font-size: 12px; color: #666; margin-bottom: 5px;">* All metrics are reported in percentage (%). Higher values are <b>bolded</b>.</p>
-  <thead>
-    <tr style="border-top: 2px solid black; border-bottom: 1px solid black;">
-      <th align="left" style="padding: 6px 12px; white-space: nowrap;">Method (Average 50 Tasks)</th>
-      <th align="center" style="padding: 6px 12px;">Easy SR (%)</th>
-      <th align="center" style="padding: 6px 12px;">Hard SR (%)</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="padding: 4px 12px; white-space: nowrap;">X-VLA</td>
-      <td align="center">72.9</td>
-      <td align="center">72.8</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 12px; white-space: nowrap;">&pi;<sub>0</sub></td>
-      <td align="center">65.9</td>
-      <td align="center">58.4</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 12px; white-space: nowrap;">&pi;<sub>0.5</sub></td>
-      <td align="center">82.7</td>
-      <td align="center">76.8</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 12px; white-space: nowrap;">Motus</td>
-      <td align="center"><u>88.7</u></td>
-      <td align="center"><u>87.0</u></td>
-    </tr>
-    <tr style="border-top: 1px solid black; border-bottom: 2px solid black;">
-      <td style="padding: 6px 12px; white-space: nowrap;"><b>LingBot-VA (Ours)</b></td>
-      <td align="center"><b>92.9</b> <small>(+4.2)</small></td>
-      <td align="center"><b>91.6</b> <small>(+4.6)</small></td>
-    </tr>
-  </tbody>
-</table>
-
-
-- **LIBERO**
-
-<table style="border-collapse: collapse; width: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; font-size: 13px; line-height: 1.2;">
-<!-- 指标说明 -->
-  <p style="font-size: 12px; color: #666; margin-bottom: 5px;">* All metrics are reported in percentage (%). Higher values are <b>bolded</b>.</p>
-  <thead>
-    <tr style="border-top: 2px solid black; border-bottom: 1px solid black;">
-      <th align="left" style="padding: 6px 10px; border-right: 1px solid black; white-space: nowrap;">Methods</th>
-      <th align="center" style="padding: 6px 8px;">Spatial</th>
-      <th align="center" style="padding: 6px 8px;">Object</th>
-      <th align="center" style="padding: 6px 8px;">Goal</th>
-      <th align="center" style="padding: 6px 8px;">Long</th>
-      <th align="center" style="padding: 6px 8px;">Avg</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="padding: 4px 10px; border-right: 1px solid black; white-space: nowrap;">&pi;<sub>0</sub></td>
-      <td align="center">96.8</td><td align="center">98.8</td><td align="center">95.8</td><td align="center">85.2</td><td align="center">94.1</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 10px; border-right: 1px solid black; white-space: nowrap;">&pi;<sub>0.5</sub></td>
-      <td align="center">98.8</td><td align="center">98.2</td><td align="center">98.0</td><td align="center">92.4</td><td align="center">96.9</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 10px; border-right: 1px solid black; white-space: nowrap;">OpenVLA</td>
-      <td align="center">84.7</td><td align="center">88.4</td><td align="center">79.2</td><td align="center">53.7</td><td align="center">76.5</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 10px; border-right: 1px solid black; white-space: nowrap;">X-VLA</td>
-      <td align="center">98.2</td><td align="center">98.6</td><td align="center">97.8</td><td align="center">97.6</td><td align="center">98.1</td>
-    </tr>
-    <tr style="border-top: 1.5px solid black; border-bottom: 2px solid black;">
-      <td style="padding: 5px 10px; border-right: 1px solid black; white-space: nowrap;"><b>LingBot-VA (Ours)</b></td>
-      <td align="center"><b>98.5 &plusmn; 0.3</b></td>
-      <td align="center"><b>99.6 &plusmn; 0.3</b></td>
-      <td align="center"><b>97.2 &plusmn; 0.2</b></td>
-      <td align="center"><b>98.5 &plusmn; 0.5</b></td>
-      <td align="center"><b>98.5</b></td>
-    </tr>
-  </tbody>
-</table>
-
-
-
-&nbsp;
-
-## Real-world Deployment
-
-Six manipulation tasks across three categories: longhorizon tasks (Make Breakfast, Pick Screws), precision tasks (Insert Tube, Unpack Delivery), and deformable & articulated object
-manipulation (Fold Clothes, Fold Pants). Our method achieves state-of-the-art performance on both metrics (Progress Rate and Success Rate) with <b>only 50 trials</b> per task, substantially outperforming strong baseline &pi;<sub>0.5</sub>.
-
-<div style="text-align: left; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; line-height: 1.6;">
-
-  <!-- 第一部分：PS 说明 -->
-  <div style="margin-bottom: 5px;"><strong>Progress Score (PS):</strong> The average score across all trials divided by the maximum possible score, expressed as a percentage:</div>
-
-  PS = Average_Progress / Max_Steps &times; 100%
-
-  <!-- 第二部分：SR 说明 -->
-  <div style="margin-bottom: 5px;"><strong>Success Rate (SR):</strong> The number of successful trials divided by the total number of trials, expressed as a percentage:</div>
-
-  SR = Successful_Trials / N &times; 100%
-
-</div>
-
-
-
-<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;">
-  <!-- 指标说明 -->
-  <p style="font-size: 12px; color: #666; margin-bottom: 5px;">* All metrics are reported in percentage (%). Higher values are <b>bolded</b>.</p>
-  
-  <table style="border-collapse: collapse; width: auto; font-size: 13px; line-height: 1.2;">
-    <thead>
-      <tr style="border-top: 2px solid black;">
-        <th rowspan="2" align="left" style="padding: 4px 10px; border-bottom: 1px solid black; white-space: nowrap;"><b>Task</b></th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Make Breakfast</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Pick Screws</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Insert Tube</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Unpack Delivery</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Fold Clothes</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Fold Pants</th>
-      </tr>
-      <tr style="border-bottom: 1px solid black;">
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td style="padding: 6px 10px; white-space: nowrap;">&pi;<sub>0.5</sub></td>
-        <td align="center">73.0</td><td align="center">70.0</td>
-        <td align="center">74.0</td><td align="center">50.0</td>
-        <td align="center">79.2</td><td align="center">30.0</td>
-        <td align="center">73.0</td><td align="center">25.0</td>
-        <td align="center"><b>62.9</b></td><td align="center">30.0</td>
-        <td align="center">30.0</td><td align="center">30.0</td>
-      </tr>
-      <tr style="border-bottom: 2px solid black;">
-        <td style="padding: 6px 10px; white-space: nowrap;"><b>LingBot-VA (Ours)</b></td>
-        <td align="center"><b>97.0</b></td><td align="center"><b>75.0</b></td>
-        <td align="center"><b>82.5</b></td><td align="center"><b>70.0</b></td>
-        <td align="center"><b>85.8</b></td><td align="center"><b>40.0</b></td>
-        <td align="center"><b>84.5</b></td><td align="center"><b>65.0</b></td>
-        <td align="center">48.8</td><td align="center"><b>35.0</b></td>
-        <td align="center"><b>76.7</b></td><td align="center"><b>70.0</b></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-
-# 🪪 License
-
-This project is released under the Apache License 2.0. See [LICENSE](LICENSE.txt) file for details.
-
-# 📚Citation
-
-```bibtex
-@article{lingbot-va2026,
-  title={Causal World Modeling for Robot Control},
-  author={Li, Lin and Zhang, Qihang and Luo, Yiming and Yang, Shuai and Wang, Ruilin and Han, Fei and Yu, Mingrui and Gao, Zelin and Xue, Nan and Zhu, Xing and Shen, Yujun and Xu, Yinghao},
-  journal={arXiv preprint arXiv:2601.21998},
-  year={2026}
-}
+ckpt = Path(os.environ["LINGBOT_LIBERO_CKPT_PATH"])
+cfg = ckpt / "transformer" / "config.json"
+data = json.loads(cfg.read_text())
+print("attn_mode =", data.get("attn_mode"))
+PY
 ```
 
-# 🧩 Acknowledgments
+For baseline/LQR inference, use an inference mode such as `torch` or
+`flashattn`. If your checkpoint is set to a training-only mode, edit
+`transformer/config.json` before running evaluation.
 
-This work builds upon several excellent open-source projects:
+## Perturbation Types
 
-- [Wan-Video](https://github.com/Wan-Video) - Vision transformer backbone
-- [MoT](https://github.com/facebookresearch/Mixture-of-Transformers) - Mixture-of-Transformers architecture
-- The broader open-source computer vision and robotics communities
+The workflow supports three perturbation families:
 
----
+| Perturbation | Baseline config | LQR collection config | Default eval tasks |
+| --- | --- | --- | --- |
+| Init position | `scripts/lqr/configs/eval_init_pos.yaml` | `scripts/lqr/configs/perturb_spec_init_pos.yaml` | `1 2 3 7 9` |
+| Gaussian image noise | `scripts/lqr/configs/perturb_spec_gaussian_30.yaml` | `scripts/lqr/configs/perturb_spec_gaussian_30.yaml` | `6 0 1 4 7` |
+| Camera randomization | `scripts/lqr/configs/eval_camera.yaml` | `scripts/lqr/configs/perturb_spec_camera.yaml` | `0 2 4 5 9` |
 
-For questions, discussions, or collaborations:
+Baseline uses `run_libero_policy_eval.py`, which starts the unmodified
+LingBot-VA server and then runs the LIBERO client under perturbations.
 
-- **Issues**: Open an [issue](https://github.com/robbyant/lingbot-va/issues) on GitHub
-- **Email**: Contact Dr. [Qihang Zhang](https://zqh0253.github.io/) (liuhuan.zqh@antgroup.com) or Dr. [Lin Li](https://lilin-hitcrt.github.io/) (fengchang.ll@antgroup.com) 
+LQR uses `run_lqr_pipeline.sh`, which collects positive/negative examples,
+builds row-aligned pairs, runs SVD, computes Jacobians, starts an LQR-injected
+server, and evaluates.
+
+## Run the Vanilla Baseline
+
+First configure the checkpoint:
+
+```bash
+cd /path/to/LingBot-VA-Modification
+conda activate lingbot
+export LINGBOT_LIBERO_CKPT_PATH=/path/to/checkpoints/lingbot-libero
+```
+
+Run all three perturbation families:
+
+```bash
+bash run_baseline_perturbations.sh
+```
+
+Default outputs:
+
+```text
+outputs/baseline/init_pos/
+outputs/baseline/gaussian/
+outputs/baseline/camera/
+```
+
+Each output directory contains per-variant rollout videos and a `summary.json`.
+
+Useful baseline overrides:
+
+```bash
+# Use fewer episodes for a smoke test.
+EVAL_NUM_EPISODES=2 bash run_baseline_perturbations.sh
+
+# Resume partial outputs.
+RESUME=1 bash run_baseline_perturbations.sh
+
+# Change output root.
+OUT_BASE=outputs/baseline_debug bash run_baseline_perturbations.sh
+
+# Evaluate different task ids.
+INIT_POS_TASK_IDS="1 7" \
+GAUSSIAN_TASK_IDS="6" \
+CAMERA_TASK_IDS="0 4" \
+bash run_baseline_perturbations.sh
+
+# Pin the WebSocket port.
+PORT=29500 bash run_baseline_perturbations.sh
+```
+
+Run one perturbation manually:
+
+```bash
+python scripts/lqr/run_libero_policy_eval.py \
+  --config-name libero \
+  --libero-benchmark libero_10 \
+  --task-ids 1 2 3 7 9 \
+  --num-episodes 20 \
+  --startup-wait-sec 1200 \
+  --perturb-spec scripts/lqr/configs/eval_init_pos.yaml \
+  --out-dir outputs/baseline/init_pos
+```
+
+## Run LQR Pipelines
+
+The LQR launchers are shell scripts, not sbatch files. They can run inside an
+interactive GPU allocation, a normal terminal with GPU access, or any job system
+wrapper that calls `bash`.
+
+Always set the checkpoint path first:
+
+```bash
+cd /path/to/LingBot-VA-Modification
+conda activate lingbot
+export LINGBOT_LIBERO_CKPT_PATH=/path/to/checkpoints/lingbot-libero
+```
+
+Run init-position LQR:
+
+```bash
+bash run_lqr_init_pos.sh
+```
+
+Run Gaussian-noise LQR:
+
+```bash
+bash run_lqr_gaussian.sh
+```
+
+Run camera-perturbation LQR:
+
+```bash
+bash run_lqr_camera.sh
+```
+
+Useful LQR smoke tests:
+
+```bash
+# Build artifacts only; skip rollout eval.
+SKIP_EVAL=1 NUM_EPISODES=2 bash run_lqr_init_pos.sh
+
+# Very small Gaussian run.
+SKIP_EVAL=1 NUM_EPISODES=2 NUM_SAMPLES=2 K_TARGET=2 bash run_lqr_gaussian.sh
+
+# Very small camera run.
+SKIP_EVAL=1 NUM_EPISODES=2 N_POS=2 N_NEG=2 NUM_SAMPLES=2 K_TARGET=2 bash run_lqr_camera.sh
+```
+
+Default LQR outputs are written under `outputs/lqr/`, with timestamped
+subdirectories. The most important artifacts are:
+
+- `pairs_*`: raw positive and negative rollout records.
+- `pairs_all_*`: row-aligned positive/negative pairs.
+- `svd_*`: SVD basis, contrastive vectors, and projected diffs.
+- `A_tilde_lingbot/`: Jacobian artifacts under the SVD directory.
+- `outputs/lqr_eval_*`: LQR rollout videos and success metrics.
+
+## LQR Pipeline Stages
+
+The high-level stages are:
+
+1. `run_collect_pairs.py`: collect positive/negative records under the selected
+   perturbation.
+2. `pair_inputs_by_similarity.py`: for init-position, match unaligned success
+   and failure buckets by similarity.
+3. `run_partition_svd.py`: compute contrastive SVD bases from activation deltas.
+4. `run_compute_jacobians.py`: fit projected Jacobians with VJP by default.
+5. `run_libero_lqr_eval.py`: start the LQR-injected server and run LIBERO eval.
+
+`run_lqr_pipeline.sh` orchestrates these stages.
+
+## Reusing Existing LQR Artifacts
+
+If you already collected pairs:
+
+```bash
+EXISTING_COLLECT_DIR=outputs/lqr/pairs_init_pos_xxx \
+SKIP_EVAL=1 \
+bash run_lqr_init_pos.sh
+```
+
+If you already have row-aligned pairs:
+
+```bash
+EXISTING_PAIRS_ALL_DIR=outputs/lqr/pairs_all_init_pos_xxx \
+SKIP_EVAL=1 \
+bash run_lqr_init_pos.sh
+```
+
+If you already have an SVD directory and only want eval:
+
+```bash
+SVD_DIR=outputs/lqr/svd_all_perturb_init_pos_xxx \
+JAC_SUBDIR=A_tilde_lingbot \
+bash run_lqr_init_pos.sh
+```
+
+## Important Runtime Variables
+
+Core variables:
+
+| Variable | Default | Used by | Description |
+| --- | --- | --- | --- |
+| `CONFIG_NAME` | `libero` | baseline, LQR | LingBot config name. |
+| `LIBERO_BENCHMARK` | `libero_10` | baseline, LQR | LIBERO benchmark suite. |
+| `TASK_ID` | script-specific | LQR | Collection task id. |
+| `TASK_IDS` | script-specific | baseline, LQR eval | Space-separated eval task ids. |
+| `NUM_EPISODES` | script-specific | LQR collect | Collection episodes. |
+| `EVAL_NUM_EPISODES` | `20` | baseline, LQR eval | Eval episodes per task/variant. |
+| `PERTURB_SPEC` | script-specific | LQR collect/eval | Perturbation config. |
+| `OUT_BASE` | script-specific | baseline, LQR | Output root. |
+| `PORT` | auto | baseline, LQR | Server/client WebSocket port. |
+| `EVAL_STARTUP_WAIT_SEC` | `1200` | baseline, LQR eval | Server startup wait timeout. |
+
+LQR-specific variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `COLLECT_MODE` | script-specific | Capture `action` or `video` branch activations. |
+| `SELECTED_TIMESTEPS` | script-specific | Denoising timesteps used for SVD/Jacobian. |
+| `NUM_SAMPLES` | script-specific | Number of paired rows used for SVD; `-1` means all. |
+| `K_TARGET` | `64` | Projection rank. |
+| `P_OVER` | `10` | PCA oversampling rank. |
+| `PARTITIONS` | script-specific | Layer partitions, e.g. `0-9,10-19,20-29`; empty means auto. |
+| `JAC_METHOD` | `vjp` | Jacobian method. |
+| `JAC_SUBDIR` | `A_tilde_lingbot` | Jacobian artifact subdirectory under `SVD_DIR`. |
+| `LQR_CONFIG` | script-specific | LQR controller config. |
+| `INJECT_MODE` | `auto` | Injection branch during eval. |
+| `SKIP_EVAL` | `0` | Set `1` to stop after artifact generation. |
+
+## Dummy Path Replacement Checklist
+
+Before sharing or running on a new machine:
+
+1. Search for non-dummy absolute paths:
+
+```bash
+PRIVATE_PATTERNS='old_user|old_account|old_storage_mount|old_email_domain'
+rg -n "${PRIVATE_PATTERNS}" \
+  --glob '!outputs/**' \
+  --glob '!logs/**' \
+  --glob '!*.pdf' \
+  --glob '!*.pyc'
+```
+
+2. Replace required local paths through environment variables, not hardcoded
+   edits:
+
+```bash
+export LINGBOT_LIBERO_CKPT_PATH=/path/to/checkpoints/lingbot-libero
+export LINGBOT_REPO_DIR=/path/to/LingBot-VA-Modification
+export LINGBOT_DEBUG_LOG_PATH=outputs/debug/build_all_pairs_debug.jsonl
+```
+
+3. Keep generated artifacts out of commits. This repo ignores:
+
+```text
+logs/
+outputs/
+*.out
+*.err
+__pycache__/
+```
+
+4. If you need to publish experiment outputs, sanitize their manifests/logs
+   separately because generated files can contain absolute paths from the
+   machine that produced them.
+
+## Troubleshooting
+
+Server does not start:
+
+- Check `PORT` is free.
+- Increase `EVAL_STARTUP_WAIT_SEC`.
+- Confirm `LINGBOT_LIBERO_CKPT_PATH` points to a real checkpoint.
+- Confirm `transformer/config.json` has an inference-compatible `attn_mode`.
+
+Client cannot create LIBERO env:
+
+- Verify LIBERO imports.
+- Verify assets are installed.
+- Run robosuite macro setup if prompted.
+- On headless machines, confirm EGL/MuJoCo rendering works in your environment.
+
+Shape mismatch during LQR:
+
+- Make sure `COLLECT_MODE`, `INJECT_MODE`, `LQR_CONFIG`, and the SVD/Jacobian
+  artifacts all correspond to the same activation branch.
+- For video-mode artifacts, use `LQR_CONFIG=scripts/lqr/configs/lqr_config_video.yaml`.
+- For action-mode artifacts, use `LQR_CONFIG=scripts/lqr/configs/lqr_config.yaml`.
+
+Partial run or crash:
+
+- For baseline, use `RESUME=1`.
+- For LQR, reuse `EXISTING_COLLECT_DIR`, `EXISTING_PAIRS_ALL_DIR`, or `SVD_DIR`.
+- Keep `PORT` fixed if you are restarting a run manually and want predictable
+  server/client behavior.
+
+## Minimal End-to-End Example
+
+```bash
+cd /path/to/LingBot-VA-Modification
+conda activate lingbot
+export LINGBOT_LIBERO_CKPT_PATH=/path/to/checkpoints/lingbot-libero
+
+# Baseline, all three perturbations, quick smoke test.
+EVAL_NUM_EPISODES=2 bash run_baseline_perturbations.sh
+
+# LQR artifact smoke test for init-position perturbation.
+SKIP_EVAL=1 NUM_EPISODES=2 K_TARGET=2 NUM_SAMPLES=2 bash run_lqr_init_pos.sh
+
+# Full init-position LQR run.
+bash run_lqr_init_pos.sh
+```

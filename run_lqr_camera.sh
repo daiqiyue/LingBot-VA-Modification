@@ -1,19 +1,11 @@
 #!/bin/bash
-#SBATCH -J lingbot_lqr_camera
-#SBATCH -A gts-gchou3-ideas_l40s
-#SBATCH -N 1
-#SBATCH --gres=gpu:l40s:1
-#SBATCH --mem=256G
-#SBATCH -t 20:00:00
-#SBATCH -o Lqr_Camera_Report-%j.out
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=qdai41@gatech.edu
 
 source ~/.bashrc
 set -euo pipefail
 
 conda activate "${CONDA_ENV:-lingbot}"
-cd /storage/home/hcoda1/9/qdai41/scratch/cosmos/LingBot-VA-Modification
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${LINGBOT_REPO_DIR:-${SCRIPT_DIR}}"
 
 export PYTHONPATH=.
 

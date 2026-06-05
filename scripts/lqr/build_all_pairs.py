@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -7,8 +8,11 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 
-DEBUG_LOG_PATH = "/storage/home/hcoda1/9/qdai41/scratch/cosmos/.cursor/debug-810aa6.log"
-DEBUG_SESSION_ID = "810aa6"
+DEBUG_LOG_PATH = os.environ.get(
+    "LINGBOT_DEBUG_LOG_PATH",
+    "outputs/debug/build_all_pairs_debug.jsonl",
+)
+DEBUG_SESSION_ID = os.environ.get("LINGBOT_DEBUG_SESSION_ID", "local")
 
 
 def _dbg_log(run_id: str, hypothesis_id: str, location: str, message: str, data: Dict[str, Any]) -> None:
@@ -21,6 +25,9 @@ def _dbg_log(run_id: str, hypothesis_id: str, location: str, message: str, data:
         "data": data,
         "timestamp": int(time.time() * 1000),
     }
+    if not DEBUG_LOG_PATH:
+        return
+    Path(DEBUG_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
     with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
