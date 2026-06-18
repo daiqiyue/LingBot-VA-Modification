@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 def _parse_tasks_env(value: str, default: list[int]) -> list[int]:
     if not value.strip():
         return default
-    return [int(x) for x in value.replace(",", " ").split()]
+    return [int(x) for x in value.replace(",", " ").replace(";", " ").split()]
 
 
 # Root directories produced by submit_collect_nominal.sh and submit_collect_activations.sh
@@ -607,5 +607,8 @@ def _loss_summary(losses_dict, label):
     print(f"\n### Summary: best block and last block  [{label}]\n")
     _print_table(summary, floatfmt=".4f")
 
-_loss_summary(pair_losses,    "2D SVM — top-2 PCs")
-_loss_summary(pair_losses_3d, "3D SVM — top-3 PCs")
+if pair_losses:
+    _loss_summary(pair_losses,    "2D SVM — top-2 PCs")
+    _loss_summary(pair_losses_3d, "3D SVM — top-3 PCs")
+else:
+    print("\nSkipping pairwise task summary: fewer than two tasks were requested.")

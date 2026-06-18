@@ -37,7 +37,7 @@ MARKERS = ["o", "s", "^", "D", "v", "p", "*", "h"]
 def _parse_tasks_env(value, default):
     if not value.strip():
         return default
-    return [int(x) for x in value.replace(",", " ").split()]
+    return [int(x) for x in value.replace(",", " ").replace(";", " ").split()]
 
 
 # DATA_DIR         = "policy_inputs_new_cam"
